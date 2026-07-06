@@ -1,8 +1,101 @@
-import { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useAuthStore from '../../store/authStore';
 import { apiUrl } from '../../lib/apiUrl';
+import {
+  semverGt,
+  getPlatform,
+  getCurrentVersion,
+  fetchLatestRelease,
+  getDownloadUrl,
+  installUpdate,
+} from '../../lib/updateCheck';
+
+function UpdateSection() {
+  const { t } = useTranslation();
+  const [platform] = useState(getPlatform);
+  const [currentVersion, setCurrentVersion] = useState(null);
+  const [release, setRelease] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [installing, setInstalling] = useState(false);
+
+  const check = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setCurrentVersion(await getCurrentVersion(platform));
+      setRelease(await fetchLatestRelease());
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [platform]);
+
+  useEffect(() => { check(); }, [check]);
+
+  const latestVersion = release?.tag_name?.replace(/^v/, '');
+  const hasUpdate = currentVersion && latestVersion && semverGt(latestVersion, currentVersion);
+
+  function handleInstall() {
+    const url = getDownloadUrl(release, platform);
+    if (!url) return;
+    setInstalling(true);
+    installUpdate(platform, url, latestVersion);
+  }
+
+  return (
+    <div className="mb-8">
+      <label className="mb-2 block text-sm font-medium">{t('updates.title')}</label>
+      <div className="rounded-lg border border-neutral-300 p-3 text-sm dark:border-neutral-600">
+        {loading && <p className="text-neutral-400">{t('updates.checking')}</p>}
+        {error && !loading && <p className="text-red-500">{t('updates.error')}: {error}</p>}
+        {!loading && !error && release && (
+          <div className="space-y-2">
+            {platform !== 'web' && currentVersion && (
+              <div className="flex justify-between">
+                <span className="text-neutral-400">{t('updates.installed')}</span>
+                <span className="font-medium">v{currentVersion}</span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span className="text-neutral-400">{t('updates.latest')}</span>
+              <span className="font-medium">{release.tag_name}</span>
+            </div>
+            <div className={`rounded-lg px-3 py-2 font-medium ${hasUpdate ? 'bg-amber-500/10 text-amber-600' : 'bg-green-500/10 text-green-600'}`}>
+              {hasUpdate ? t('updates.updateAvailable') : t('updates.upToDate')}
+            </div>
+            {(hasUpdate || platform === 'web') && (
+              platform !== 'web' ? (
+                <button
+                  onClick={handleInstall}
+                  disabled={installing}
+                  className="w-full rounded-lg bg-accent px-3 py-2 font-medium text-white hover:bg-accent-dark disabled:opacity-50"
+                >
+                  {installing ? t('updates.downloading') : t('updates.install')}
+                </button>
+              ) : (
+                <a
+                  href={release.html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block w-full rounded-lg bg-neutral-200 px-3 py-2 text-center font-medium hover:bg-neutral-300 dark:bg-neutral-700 dark:hover:bg-neutral-600"
+                >
+                  {t('updates.viewRelease')}
+                </a>
+              )
+            )}
+          </div>
+        )}
+        <button onClick={check} disabled={loading} className="mt-2 text-xs text-neutral-400 hover:text-neutral-700 disabled:opacity-40 dark:hover:text-neutral-200">
+          {t('updates.refresh')}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function Settings() {
   const { t, i18n } = useTranslation();
@@ -79,6 +172,8 @@ export default function Settings() {
           {t('auth.changePassword')}
         </button>
       </form>
+
+      <UpdateSection />
 
       <button onClick={handleLogout} className="text-sm text-red-500 hover:underline">
         {t('settings.logout')}

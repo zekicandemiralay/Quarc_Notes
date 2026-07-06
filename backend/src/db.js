@@ -67,6 +67,16 @@ function initDb() {
       tokenize = 'porter'
     );
   `);
+
+  // Per-canvas-page settings (page size + paper style). Added after the
+  // table already existed in production, so CREATE TABLE IF NOT EXISTS above
+  // won't add it to existing databases — migrate explicitly.
+  const pageCols = database.pragma('table_info(pages)').map((c) => c.name);
+  if (!pageCols.includes('canvas_settings')) {
+    database.exec(
+      `ALTER TABLE pages ADD COLUMN canvas_settings TEXT DEFAULT '{"pageSize":"A5","pageStyle":"lined"}'`
+    );
+  }
 }
 
 module.exports = { getDb, initDb };

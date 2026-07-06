@@ -10,7 +10,7 @@ export default function PageView() {
   const { id } = useParams();
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { refreshSidebar } = useOutletContext();
+  const { refreshSidebar, collapseSidebar, sidebarCollapsed } = useOutletContext();
   const [page, setPage] = useState(null);
   const [title, setTitle] = useState('');
 
@@ -20,12 +20,13 @@ export default function PageView() {
       if (!cancelled) {
         setPage(p);
         setTitle(p?.title || '');
+        if (p?.type === 'canvas') collapseSidebar?.();
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, collapseSidebar]);
 
   const handleTitleBlur = useCallback(async () => {
     if (!page || title === page.title) return;
@@ -47,6 +48,13 @@ export default function PageView() {
     [id]
   );
 
+  const handleSettingsChange = useCallback(
+    async (canvas_settings) => {
+      await updatePage(id, { canvas_settings });
+    },
+    [id]
+  );
+
   async function handleTrash() {
     await trashPage(id);
     refreshSidebar();
@@ -58,7 +66,7 @@ export default function PageView() {
   if (page.type === 'canvas') {
     return (
       <div className="flex h-full flex-col">
-        <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-2 dark:border-neutral-700">
+        <div className={`flex items-center justify-between border-b border-neutral-200 px-4 py-2 dark:border-neutral-700 ${sidebarCollapsed ? 'pl-12' : ''}`}>
           <input
             className="flex-1 bg-transparent text-lg font-semibold outline-none"
             value={title}
@@ -71,7 +79,7 @@ export default function PageView() {
           </button>
         </div>
         <div className="flex-1">
-          <CanvasPage page={page} onChange={handleInkChange} />
+          <CanvasPage page={page} onChange={handleInkChange} onSettingsChange={handleSettingsChange} />
         </div>
       </div>
     );

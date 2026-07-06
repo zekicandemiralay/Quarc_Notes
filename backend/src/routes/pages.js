@@ -37,6 +37,7 @@ router.get('/:id', (req, res) => {
     ...page,
     content_json: JSON.parse(page.content_json || '[]'),
     ink_json: JSON.parse(page.ink_json || '[]'),
+    canvas_settings: JSON.parse(page.canvas_settings || '{"pageSize":"A5","pageStyle":"lined"}'),
   });
 });
 
@@ -62,7 +63,7 @@ router.put('/:id', (req, res) => {
   const existing = db.prepare('SELECT id FROM pages WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!existing) return res.status(404).json({ error: 'Page not found' });
 
-  const { title, icon, content_json, ink_json, parent_id, sort_order } = req.body;
+  const { title, icon, content_json, ink_json, parent_id, sort_order, canvas_settings } = req.body;
   const fields = [];
   const values = [];
   if (title !== undefined) { fields.push('title = ?'); values.push(title); }
@@ -71,6 +72,7 @@ router.put('/:id', (req, res) => {
   if (ink_json !== undefined) { fields.push('ink_json = ?'); values.push(JSON.stringify(ink_json)); }
   if (parent_id !== undefined) { fields.push('parent_id = ?'); values.push(parent_id); }
   if (sort_order !== undefined) { fields.push('sort_order = ?'); values.push(sort_order); }
+  if (canvas_settings !== undefined) { fields.push('canvas_settings = ?'); values.push(JSON.stringify(canvas_settings)); }
   fields.push("updated_at = datetime('now')");
 
   db.prepare(`UPDATE pages SET ${fields.join(', ')} WHERE id = ?`).run(...values, req.params.id);
@@ -78,7 +80,12 @@ router.put('/:id', (req, res) => {
   const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
   reindexFts(db, page);
   syncLinks(db, page);
-  res.json({ ...page, content_json: JSON.parse(page.content_json), ink_json: JSON.parse(page.ink_json) });
+  res.json({
+    ...page,
+    content_json: JSON.parse(page.content_json),
+    ink_json: JSON.parse(page.ink_json),
+    canvas_settings: JSON.parse(page.canvas_settings || '{"pageSize":"A5","pageStyle":"lined"}'),
+  });
 });
 
 // Soft delete (trash) — page and all its descendants

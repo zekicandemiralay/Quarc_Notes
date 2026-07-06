@@ -31,6 +31,7 @@ router.get('/pull', (req, res) => {
       ...p,
       content_json: JSON.parse(p.content_json || '[]'),
       ink_json: JSON.parse(p.ink_json || '[]'),
+      canvas_settings: JSON.parse(p.canvas_settings || '{"pageSize":"A5","pageStyle":"lined"}'),
     })),
   });
 });
@@ -59,19 +60,21 @@ router.post('/push', (req, res) => {
       continue;
     }
 
+    const canvasSettings = JSON.stringify(m.canvas_settings || { pageSize: 'A5', pageStyle: 'lined' });
+
     if (current) {
       db.prepare(`
         UPDATE pages SET title = ?, icon = ?, content_json = ?, ink_json = ?,
-          parent_id = ?, sort_order = ?, type = ?, updated_at = datetime('now')
+          parent_id = ?, sort_order = ?, type = ?, canvas_settings = ?, updated_at = datetime('now')
         WHERE id = ?
       `).run(m.title, m.icon || null, JSON.stringify(m.content_json || []), JSON.stringify(m.ink_json || []),
-        m.parent_id || null, m.sort_order || 0, m.type || 'doc', m.id);
+        m.parent_id || null, m.sort_order || 0, m.type || 'doc', canvasSettings, m.id);
     } else {
       db.prepare(`
-        INSERT INTO pages (id, user_id, parent_id, title, icon, type, content_json, ink_json, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO pages (id, user_id, parent_id, title, icon, type, content_json, ink_json, sort_order, canvas_settings)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(m.id, req.user.id, m.parent_id || null, m.title || 'Untitled', m.icon || null, m.type || 'doc',
-        JSON.stringify(m.content_json || []), JSON.stringify(m.ink_json || []), m.sort_order || 0);
+        JSON.stringify(m.content_json || []), JSON.stringify(m.ink_json || []), m.sort_order || 0, canvasSettings);
     }
 
     const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(m.id);

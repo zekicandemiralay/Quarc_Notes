@@ -12,6 +12,7 @@
     "@blocknote/ariakit": "^0.51.4",
     "@blocknote/core": "^0.51.4",
     "@blocknote/react": "^0.51.4",
+    "@excalidraw/excalidraw": "^0.18.1",
     "dexie": "^4.0.8",
     "dexie-react-hooks": "^1.1.7",
     "i18next": "^23.11.5",

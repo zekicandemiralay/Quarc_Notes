@@ -16,7 +16,9 @@
     "newCanvas": "New drawing",
     "search": "Search",
     "trash": "Trash",
-    "settings": "Settings"
+    "settings": "Settings",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar"
   },
   "page": {
     "untitled": "Untitled",
@@ -27,11 +29,14 @@
     "deleteForever": "Delete forever"
   },
   "canvas": {
-    "pen": "Pen",
-    "eraser": "Eraser",
-    "undo": "Undo",
-    "redo": "Redo",
-    "clear": "Clear"
+    "penMode": "Pen",
+    "penModeHint": "Real pressure-sensitive handwriting with a stylus. Turn off to use Excalidraw's shapes, text, select, and eraser tools.",
+    "pageSettings": "Page settings",
+    "pageSize": "Size",
+    "pageStyle": "Style",
+    "lined": "Lined",
+    "squared": "Squared",
+    "empty": "Empty"
   },
   "search": {
     "placeholder": "Search your notes...",
@@ -40,5 +45,20 @@
   "settings": {
     "language": "Language",
     "logout": "Log out"
+  },
+  "updates": {
+    "title": "Check for Updates",
+    "checking": "Checking…",
+    "error": "Error",
+    "installed": "Installed",
+    "latest": "Latest",
+    "updateAvailable": "Update available",
+    "upToDate": "You're up to date",
+    "install": "Install",
+    "downloading": "Starting…",
+    "viewRelease": "View on GitHub",
+    "refresh": "Refresh",
+    "checkForUpdates": "Check for Updates",
+    "installNow": "Install now"
   }
 }

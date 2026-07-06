@@ -16,7 +16,9 @@
     "newCanvas": "Yeni çizim",
     "search": "Ara",
     "trash": "Çöp kutusu",
-    "settings": "Ayarlar"
+    "settings": "Ayarlar",
+    "collapse": "Kenar çubuğunu daralt",
+    "expand": "Kenar çubuğunu genişlet"
   },
   "page": {
     "untitled": "Başlıksız",
@@ -27,11 +29,14 @@
     "deleteForever": "Kalıcı olarak sil"
   },
   "canvas": {
-    "pen": "Kalem",
-    "eraser": "Silgi",
-    "undo": "Geri al",
-    "redo": "Yinele",
-    "clear": "Temizle"
+    "penMode": "Kalem",
+    "penModeHint": "Kalemle gerçek basınç duyarlı el yazısı. Excalidraw'ın şekil, metin, seçim ve silgi araçlarını kullanmak için kapatın.",
+    "pageSettings": "Sayfa ayarları",
+    "pageSize": "Boyut",
+    "pageStyle": "Stil",
+    "lined": "Çizgili",
+    "squared": "Kareli",
+    "empty": "Boş"
   },
   "search": {
     "placeholder": "Notlarınızda arayın...",
@@ -40,5 +45,20 @@
   "settings": {
     "language": "Dil",
     "logout": "Çıkış yap"
+  },
+  "updates": {
+    "title": "Güncellemeleri kontrol et",
+    "checking": "Kontrol ediliyor…",
+    "error": "Hata",
+    "installed": "Yüklü",
+    "latest": "Son sürüm",
+    "updateAvailable": "Güncelleme mevcut",
+    "upToDate": "Güncelsiniz",
+    "install": "Yükle",
+    "downloading": "Başlatılıyor…",
+    "viewRelease": "GitHub'da görüntüle",
+    "refresh": "Yenile",
+    "checkForUpdates": "Güncellemeleri kontrol et",
+    "installNow": "Şimdi yükle"
   }
 }

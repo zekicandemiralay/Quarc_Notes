@@ -26,6 +26,7 @@ export async function pushOutbox() {
     ink_json: m.ink_json,
     parent_id: m.parent_id,
     sort_order: m.sort_order,
+    canvas_settings: m.canvas_settings,
     base_updated_at: m.base_updated_at,
   }));
 
@@ -55,7 +56,12 @@ export async function pullFromServer() {
 
   const { pages, serverTime } = await res.json();
   if (pages.length) {
-    await db.pages.bulkPut(pages.map((p) => ({ ...p, content_json: JSON.stringify(p.content_json), ink_json: JSON.stringify(p.ink_json) })));
+    await db.pages.bulkPut(pages.map((p) => ({
+      ...p,
+      content_json: JSON.stringify(p.content_json),
+      ink_json: JSON.stringify(p.ink_json),
+      canvas_settings: JSON.stringify(p.canvas_settings),
+    })));
   }
   await setCursor(serverTime);
 }

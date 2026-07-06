@@ -4,11 +4,17 @@ import { apiUrl } from './apiUrl';
 
 const uuidv4 = () => crypto.randomUUID();
 
+const DEFAULT_CANVAS_SETTINGS = { pageSize: 'A5', pageStyle: 'lined' };
+
 function parse(page) {
   return {
     ...page,
     content_json: typeof page.content_json === 'string' ? JSON.parse(page.content_json) : page.content_json,
     ink_json: typeof page.ink_json === 'string' ? JSON.parse(page.ink_json) : page.ink_json,
+    canvas_settings:
+      typeof page.canvas_settings === 'string'
+        ? JSON.parse(page.canvas_settings)
+        : page.canvas_settings || DEFAULT_CANVAS_SETTINGS,
   };
 }
 
@@ -43,6 +49,7 @@ async function queueMutation(page, op = 'upsert') {
     ink_json: page.ink_json,
     parent_id: page.parent_id,
     sort_order: page.sort_order,
+    canvas_settings: page.canvas_settings,
     base_updated_at: page.updated_at,
   });
   sync();
@@ -58,12 +65,18 @@ export async function createPage({ title = 'Untitled', parent_id = null, type = 
     type,
     content_json: [],
     ink_json: [],
+    canvas_settings: { ...DEFAULT_CANVAS_SETTINGS },
     sort_order: Date.now(),
     is_deleted: 0,
     created_at: now,
     updated_at: now,
   };
-  await db.pages.put({ ...page, content_json: JSON.stringify(page.content_json), ink_json: JSON.stringify(page.ink_json) });
+  await db.pages.put({
+    ...page,
+    content_json: JSON.stringify(page.content_json),
+    ink_json: JSON.stringify(page.ink_json),
+    canvas_settings: JSON.stringify(page.canvas_settings),
+  });
   await queueMutation(page);
   return page;
 }
@@ -71,7 +84,12 @@ export async function createPage({ title = 'Untitled', parent_id = null, type = 
 export async function updatePage(id, patch) {
   const existing = await getPage(id);
   const updated = { ...existing, ...patch, updated_at: new Date().toISOString() };
-  await db.pages.put({ ...updated, content_json: JSON.stringify(updated.content_json), ink_json: JSON.stringify(updated.ink_json) });
+  await db.pages.put({
+    ...updated,
+    content_json: JSON.stringify(updated.content_json),
+    ink_json: JSON.stringify(updated.ink_json),
+    canvas_settings: JSON.stringify(updated.canvas_settings || DEFAULT_CANVAS_SETTINGS),
+  });
   await queueMutation(updated);
   return updated;
 }
