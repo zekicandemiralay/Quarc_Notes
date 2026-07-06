@@ -21,12 +21,22 @@ export function strokeToPath2D(points, options) {
 // values render visibly thicker under Excalidraw's sin-based easing than
 // under our old default, so a stroke that looked right while drawing still
 // thickened slightly the instant it was committed.
+//
+// `simulatePressure` defaults to `true` in perfect-freehand (confirmed by
+// reading its source), which makes it derive width from stroke *velocity*
+// and ignore the real per-point pressure values we pass in — so the live
+// preview rendered a flat, velocity-based width the whole time you were
+// writing, and only the committed Excalidraw element (built with
+// `simulatePressure: false`) showed the real pressure-sensitive thickness.
+// Setting it here makes the live preview react to real pressure instantly,
+// matching the committed result.
 export const STROKE_OPTIONS = {
   size: 3,
   thinning: 0.6,
   smoothing: 0.5,
   streamline: 0.5,
   easing: (t) => Math.sin((t * Math.PI) / 2),
+  simulatePressure: false,
 };
 
 export function distanceToStroke(stroke, x, y) {

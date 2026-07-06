@@ -6,10 +6,15 @@ import { isLegacyInkFormat, convertLegacyInk } from '../../lib/inkMigration';
 import { strokeToFreedrawElement } from '../../lib/freehandElement';
 import { strokeToPath2D, STROKE_OPTIONS } from '../../lib/freehand';
 
+// Dimensions are in scene units (same coordinate space Excalidraw elements
+// live in, i.e. CSS px at zoom 1) — real paper proportions at 72dpi. These
+// define an actual finite sheet, not just a visual aspect ratio: the page is
+// rendered as a sized/positioned rect synced to Excalidraw's own scroll/zoom
+// (see syncPage below), so it has real edges instead of tiling infinitely.
 const PAGE_SIZES = {
-  A5: { ratio: '148 / 210', label: 'A5' },
-  A4: { ratio: '210 / 297', label: 'A4' },
-  Letter: { ratio: '216 / 279', label: 'Letter' },
+  A5: { width: 420, height: 595, label: 'A5' },
+  A4: { width: 595, height: 842, label: 'A4' },
+  Letter: { width: 612, height: 792, label: 'Letter' },
 };
 
 const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined' };
@@ -33,7 +38,7 @@ const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
 
 // The pattern's own repeating image never changes — only its position/size
 // do, and those are driven straight from Excalidraw's scroll/zoom (see
-// syncBackground below) so the "paper" pans and zooms together with the ink
+// syncPage below) so the "paper" pans and zooms together with the ink
 // instead of sitting on a separate, static layer underneath it.
 function patternImage(pageStyle) {
   if (pageStyle === 'lined') {
@@ -70,26 +75,37 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const overlayCanvasRef = useRef(null);
-  const backgroundRef = useRef(null);
+  const pageRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
+  const touchPan = useRef(null); // { pointerId, startClientX, startClientY, startScrollX, startScrollY, zoom }
+  const activeTouchIds = useRef(new Set());
   const saveTimer = useRef(null);
 
-  // Keeps the paper pattern (lined/squared) glued to the same scene
-  // coordinates as the ink, instead of it being a static layer the content
-  // slides around on top of. Driven directly off Excalidraw's own
-  // scroll/zoom state via onScrollChange — written straight to the DOM
-  // (not React state) since it can fire on every frame of a pan/zoom gesture.
-  function syncBackground(scrollX, scrollY, zoomValue, pageStyle = settings.pageStyle) {
-    const bg = backgroundRef.current;
-    if (!bg) return;
+  // Renders the page as an actual finite sheet — sized and positioned in
+  // scene coordinates and synced to Excalidraw's own scroll/zoom (via
+  // onScrollChange below) — instead of a pattern that fills the whole
+  // viewport and tiles infinitely as you pan. The page's own top-left is
+  // pinned to scene (0,0), so its on-screen rect is exactly
+  // `(scrollX*zoom, scrollY*zoom)` to `((scrollX+width)*zoom, (scrollY+height)*zoom)`
+  // — the same screen-coordinate formula Excalidraw itself uses internally.
+  // Written straight to the DOM (not React state) since this can fire on
+  // every frame of a pan/zoom gesture.
+  function syncPage(scrollX, scrollY, zoomValue, pageSize = settings.pageSize, pageStyle = settings.pageStyle) {
+    const el = pageRef.current;
+    if (!el) return;
+    const dims = PAGE_SIZES[pageSize] || PAGE_SIZES.A5;
     const cellPx = CELL_SIZE * zoomValue;
-    bg.style.backgroundImage = patternImage(pageStyle);
-    bg.style.backgroundSize = patternSize(pageStyle, cellPx);
-    bg.style.backgroundPosition = `${scrollX * zoomValue}px ${scrollY * zoomValue}px`;
+    el.style.left = `${scrollX * zoomValue}px`;
+    el.style.top = `${scrollY * zoomValue}px`;
+    el.style.width = `${dims.width * zoomValue}px`;
+    el.style.height = `${dims.height * zoomValue}px`;
+    el.style.backgroundImage = patternImage(pageStyle);
+    el.style.backgroundSize = patternSize(pageStyle, cellPx);
+    el.style.backgroundPosition = '0 0';
   }
 
   function handleScrollChange(scrollX, scrollY, zoom) {
-    syncBackground(scrollX, scrollY, zoom.value);
+    syncPage(scrollX, scrollY, zoom.value);
   }
 
   const initialData = useMemo(() => {
@@ -99,15 +115,30 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       // Persist the converted format immediately so we don't reconvert (and
       // don't lose it) on the next load.
       onChange(converted);
-      return { ...converted, appState: { ...converted.appState, activeTool: { type: 'freedraw' } } };
+      return {
+        ...converted,
+        appState: { scrollX: 40, scrollY: 40, zoom: { value: 1 }, ...converted.appState, activeTool: { type: 'freedraw' } },
+      };
     }
     return {
       elements: raw?.elements || [],
-      // Setting activeTool here (applied through Excalidraw's own initial
-      // state restore) is what actually makes "pen selected by default"
-      // reliable — an imperative setActiveTool() call after mount races
-      // against Excalidraw's own post-mount setup and isn't deterministic.
-      appState: { viewBackgroundColor: 'transparent', ...(raw?.appState || {}), activeTool: { type: 'freedraw' } },
+      // Setting activeTool (and the initial scroll/zoom) here — applied
+      // through Excalidraw's own initial state restore — is what actually
+      // makes them stick reliably. An imperative setActiveTool()/
+      // updateScene() call after mount races against Excalidraw's own
+      // post-mount setup: confirmed empirically that a post-mount
+      // updateScene({appState:{scrollX,scrollY,zoom}}) call is silently
+      // reverted (getAppState() still reports the pre-call values seconds
+      // later), the same way an imperative setActiveTool() call used to be
+      // unreliable for the default tool.
+      appState: {
+        viewBackgroundColor: 'transparent',
+        scrollX: 40,
+        scrollY: 40,
+        zoom: { value: 1 },
+        ...(raw?.appState || {}),
+        activeTool: { type: 'freedraw' },
+      },
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
@@ -132,7 +163,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   function handleExcalidrawAPI(api) {
     excalidrawAPIRef.current = api;
     const appState = api.getAppState();
-    syncBackground(appState.scrollX, appState.scrollY, appState.zoom.value);
+    syncPage(appState.scrollX, appState.scrollY, appState.zoom.value);
   }
 
   function updateSettings(patch) {
@@ -142,7 +173,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const api = excalidrawAPIRef.current;
     if (api) {
       const appState = api.getAppState();
-      syncBackground(appState.scrollX, appState.scrollY, appState.zoom.value, next.pageStyle);
+      syncPage(appState.scrollX, appState.scrollY, appState.zoom.value, next.pageSize, next.pageStyle);
     }
   }
 
@@ -192,32 +223,113 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   const isPenActive = activeToolType === 'freedraw';
 
-  // Capture phase on the page container: only ever intercepts real pen input
-  // while Excalidraw's own active tool is "freedraw". Touch/mouse pointers,
-  // and pen input while any OTHER tool (select/eraser/shapes) is active, are
-  // never touched here (no stopPropagation), so they fall through to
-  // Excalidraw untouched — that's what gives us native 1-finger pan /
-  // 2-finger pinch-zoom, and a working eraser, for free.
+  // Capture phase on the page container. Two things get intercepted here,
+  // both only while Excalidraw's own active tool is "freedraw":
+  //  - real pen input, which we turn into a properly pressure-captured
+  //    freedraw element (see finalizeStroke).
+  //  - a *lone* finger, which we turn into a pan instead of letting it draw
+  //    (Excalidraw's own default is to draw with any single pointer,
+  //    finger included, when a draw tool is active — not what a notebook
+  //    app wants: only the pen should ever leave ink; a finger should
+  //    always navigate the page).
+  // The moment a second finger joins, we back off entirely (no
+  // stopPropagation for either pointer) and let Excalidraw's native
+  // 2-finger pinch-zoom/pan take over untouched. Everything else — mouse,
+  // and pen/touch while any OTHER tool (select/eraser/shapes) is active —
+  // is never touched here, so it falls through to Excalidraw natively;
+  // that's what gives us a working eraser and select/move for free.
   function handlePointerDownCapture(e) {
-    if (!isPenActive || e.pointerType !== 'pen') return;
-    e.stopPropagation();
-    e.preventDefault();
-    drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: penColor, size: penSize };
+    if (e.pointerType === 'pen') {
+      if (!isPenActive) return;
+      e.stopPropagation();
+      e.preventDefault();
+      drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: penColor, size: penSize };
+      return;
+    }
+    if (e.pointerType === 'touch' && isPenActive) {
+      activeTouchIds.current.add(e.pointerId);
+      if (activeTouchIds.current.size > 1) {
+        touchPan.current = null;
+        return;
+      }
+      const api = excalidrawAPIRef.current;
+      const appState = api?.getAppState();
+      if (!appState) return;
+      // Deliberately NOT stopping propagation here: Excalidraw needs to see
+      // every touch's pointerdown to register it for a potential pinch a
+      // moment later. If we swallowed it here (like we do for pen), a real
+      // 2-finger pinch — where the two touches almost never land in the
+      // exact same tick — would only ever hand Excalidraw the *second*
+      // finger, and it can't compute a pinch from one registered pointer.
+      // We only start actually intercepting from the first *move* onward,
+      // once we know this is (still) just the one finger.
+      touchPan.current = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startScrollX: appState.scrollX,
+        startScrollY: appState.scrollY,
+        zoom: appState.zoom.value,
+      };
+    }
   }
 
   function handlePointerMoveCapture(e) {
-    if (!drawing.current || e.pointerId !== drawing.current.pointerId) return;
-    e.stopPropagation();
-    e.preventDefault();
-    drawing.current.points.push(getPoint(e));
-    redrawOverlay();
+    if (drawing.current && e.pointerId === drawing.current.pointerId) {
+      e.stopPropagation();
+      e.preventDefault();
+      drawing.current.points.push(getPoint(e));
+      redrawOverlay();
+      return;
+    }
+    const pan = touchPan.current;
+    if (pan && e.pointerId === pan.pointerId && activeTouchIds.current.size === 1) {
+      e.stopPropagation();
+      e.preventDefault();
+      const api = excalidrawAPIRef.current;
+      if (!api) return;
+      const scrollX = pan.startScrollX + (e.clientX - pan.startClientX) / pan.zoom;
+      const scrollY = pan.startScrollY + (e.clientY - pan.startClientY) / pan.zoom;
+      api.updateScene({ appState: { scrollX, scrollY } });
+      syncPage(scrollX, scrollY, pan.zoom);
+    }
   }
 
   function handlePointerUpCapture(e) {
-    if (!drawing.current || e.pointerId !== drawing.current.pointerId) return;
-    e.stopPropagation();
-    e.preventDefault();
-    finalizeStroke();
+    if (drawing.current && e.pointerId === drawing.current.pointerId) {
+      e.stopPropagation();
+      e.preventDefault();
+      finalizeStroke();
+      return;
+    }
+    if (e.pointerType === 'touch') {
+      activeTouchIds.current.delete(e.pointerId);
+      if (touchPan.current?.pointerId === e.pointerId) {
+        touchPan.current = null;
+        // We let this touch's pointerdown through (see handlePointerDownCapture)
+        // so Excalidraw could register it in case a pinch followed, then
+        // intercepted its moves ourselves once it turned out to be staying
+        // lone. Excalidraw's freedraw tool will have started a 1-point
+        // element from that pointerdown it never got any points for —
+        // swallow the pointerup (so it doesn't try to finalize it) and
+        // clean that stray element up.
+        e.stopPropagation();
+        e.preventDefault();
+        cleanupStrayFreedraw();
+      }
+    }
+  }
+
+  function cleanupStrayFreedraw() {
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+    const elements = api.getSceneElementsIncludingDeleted();
+    const strayIds = new Set(
+      elements.filter((el) => el.type === 'freedraw' && !el.isDeleted && (el.points?.length || 0) < 2).map((el) => el.id)
+    );
+    if (strayIds.size) {
+      api.updateScene({ elements: elements.map((el) => (strayIds.has(el.id) ? { ...el, isDeleted: true } : el)) });
+    }
   }
 
   function finalizeStroke() {
@@ -252,8 +364,6 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), element] });
     scheduleSave();
   }
-
-  const size = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
 
   return (
     <div className="relative flex h-full flex-col bg-neutral-200 dark:bg-neutral-950">
@@ -342,31 +452,30 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           )}
         </div>
       </div>
-      <div className="flex flex-1 items-center justify-center overflow-auto p-4">
-        <div
-          ref={containerRefCallback}
-          className={`quarc-canvas-page relative min-w-0 overflow-hidden bg-white shadow-xl ${isPenActive ? 'quarc-pen-active' : ''}`}
-          style={{ aspectRatio: size.ratio, height: '100%', maxWidth: '100%', touchAction: isPenActive ? 'none' : 'auto' }}
-          onPointerDownCapture={handlePointerDownCapture}
-          onPointerMoveCapture={handlePointerMoveCapture}
-          onPointerUpCapture={handlePointerUpCapture}
-          onPointerLeave={handlePointerUpCapture}
-        >
-          <style>{`
-            .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
-            .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
-          `}</style>
-          <div ref={backgroundRef} className="pointer-events-none absolute inset-0" />
-          <Excalidraw
-            key={page.id}
-            excalidrawAPI={handleExcalidrawAPI}
-            initialData={initialData}
-            onChange={handleExcalidrawChange}
-            onScrollChange={handleScrollChange}
-            theme="light"
-          />
-          <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0" />
-        </div>
+      <div
+        ref={containerRefCallback}
+        className={`quarc-canvas-page relative flex-1 overflow-hidden bg-neutral-300 dark:bg-neutral-800 ${isPenActive ? 'quarc-pen-active' : ''}`}
+        style={{ touchAction: isPenActive ? 'none' : 'auto' }}
+        onPointerDownCapture={handlePointerDownCapture}
+        onPointerMoveCapture={handlePointerMoveCapture}
+        onPointerUpCapture={handlePointerUpCapture}
+        onPointerCancelCapture={handlePointerUpCapture}
+        onPointerLeave={handlePointerUpCapture}
+      >
+        <style>{`
+          .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
+          .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
+        `}</style>
+        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl" />
+        <Excalidraw
+          key={page.id}
+          excalidrawAPI={handleExcalidrawAPI}
+          initialData={initialData}
+          onChange={handleExcalidrawChange}
+          onScrollChange={handleScrollChange}
+          theme="light"
+        />
+        <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0" />
       </div>
     </div>
   );
