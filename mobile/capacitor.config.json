@@ -1,0 +1,9 @@
+{
+  "appId": "com.quarc.notes",
+  "appName": "Quarc Notes",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#121212"
+  }
+}

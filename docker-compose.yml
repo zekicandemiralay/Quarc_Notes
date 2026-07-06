@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - notes_data:/app/data
+    environment:
+      - PORT=3003
+      - DB_PATH=/app/data/notes.db
+      - ATTACHMENTS_DIR=/app/data/attachments
+      - JWT_SECRET=${JWT_SECRET:-insecure-default-change-in-production}
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4001:443"
+    volumes:
+      - /var/lib/tailscale/certs:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+      # Lets nginx reach the quarc-auth container by name for /api/auth/*.
+      - quarcnet-shared
+
+networks:
+  app-network:
+    driver: bridge
+  quarcnet-shared:
+    external: true
+
+volumes:
+  notes_data:

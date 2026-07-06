@@ -1,0 +1,44 @@
+{
+  "auth": {
+    "signInToAccount": "Sign in to your Quarc account",
+    "username": "Username",
+    "password": "Password",
+    "login": "Log in",
+    "signup": "Sign up",
+    "needAccount": "Need an account? Sign up",
+    "haveAccount": "Already have an account? Log in",
+    "changePassword": "Change password",
+    "currentPassword": "Current password",
+    "newPassword": "New password"
+  },
+  "sidebar": {
+    "newPage": "New page",
+    "newCanvas": "New drawing",
+    "search": "Search",
+    "trash": "Trash",
+    "settings": "Settings"
+  },
+  "page": {
+    "untitled": "Untitled",
+    "backlinks": "Linked mentions",
+    "noBacklinks": "No pages link here yet",
+    "delete": "Move to trash",
+    "restore": "Restore",
+    "deleteForever": "Delete forever"
+  },
+  "canvas": {
+    "pen": "Pen",
+    "eraser": "Eraser",
+    "undo": "Undo",
+    "redo": "Redo",
+    "clear": "Clear"
+  },
+  "search": {
+    "placeholder": "Search your notes...",
+    "noResults": "No results"
+  },
+  "settings": {
+    "language": "Language",
+    "logout": "Log out"
+  }
+}

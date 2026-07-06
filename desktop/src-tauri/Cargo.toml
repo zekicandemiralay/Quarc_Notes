@@ -1,0 +1,22 @@
+[package]
+name = "quarc-notes"
+version = "0.1.0"
+description = "Quarc Notes desktop client"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+# cookie 0.18.1 uses the old 1-arg parse() API; time 0.3.52 changed it to 2 args.
+# Pin below the break until Tauri pulls in a fixed cookie version.
+time = { version = ">=0.3, <0.3.52" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

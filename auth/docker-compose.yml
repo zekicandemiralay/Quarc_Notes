@@ -1,0 +1,25 @@
+services:
+  quarc-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quarc-auth
+    volumes:
+      - auth_data:/app/data
+    environment:
+      - PORT=3002
+      - DB_PATH=/app/data/auth.db
+      - JWT_SECRET=${JWT_SECRET:-insecure-default-change-in-production}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - SECURE_COOKIE=${SECURE_COOKIE:-true}
+    restart: unless-stopped
+    networks:
+      - quarcnet-shared
+
+networks:
+  quarcnet-shared:
+    external: true
+
+volumes:
+  auth_data:

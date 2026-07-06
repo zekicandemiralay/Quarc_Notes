@@ -1,0 +1,44 @@
+{
+  "auth": {
+    "signInToAccount": "Quarc hesabınıza giriş yapın",
+    "username": "Kullanıcı adı",
+    "password": "Şifre",
+    "login": "Giriş yap",
+    "signup": "Kayıt ol",
+    "needAccount": "Hesabınız yok mu? Kayıt olun",
+    "haveAccount": "Zaten hesabınız var mı? Giriş yapın",
+    "changePassword": "Şifreyi değiştir",
+    "currentPassword": "Mevcut şifre",
+    "newPassword": "Yeni şifre"
+  },
+  "sidebar": {
+    "newPage": "Yeni sayfa",
+    "newCanvas": "Yeni çizim",
+    "search": "Ara",
+    "trash": "Çöp kutusu",
+    "settings": "Ayarlar"
+  },
+  "page": {
+    "untitled": "Başlıksız",
+    "backlinks": "Bağlantılı sayfalar",
+    "noBacklinks": "Henüz bu sayfaya bağlantı yok",
+    "delete": "Çöp kutusuna taşı",
+    "restore": "Geri yükle",
+    "deleteForever": "Kalıcı olarak sil"
+  },
+  "canvas": {
+    "pen": "Kalem",
+    "eraser": "Silgi",
+    "undo": "Geri al",
+    "redo": "Yinele",
+    "clear": "Temizle"
+  },
+  "search": {
+    "placeholder": "Notlarınızda arayın...",
+    "noResults": "Sonuç bulunamadı"
+  },
+  "settings": {
+    "language": "Dil",
+    "logout": "Çıkış yap"
+  }
+}

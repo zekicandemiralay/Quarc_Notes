@@ -1,0 +1,217 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.startsWith('refs/tags/')
+              ? context.ref.replace('refs/tags/', '')
+              : context.ref;
+            const body = [
+              '## Installation',
+              '',
+              '| Platform | File |',
+              '|----------|------|',
+              '| Android  | `Quarc-Notes-Android.apk` |',
+              '| Windows  | `*_x64-setup.exe` |',
+              '| macOS (Apple Silicon M1/M2/M3) | `*_aarch64.dmg` |',
+              '| macOS (Intel) | `*_x64.dmg` |',
+              '| Linux | `*_amd64.deb` or `*_amd64.AppImage` |',
+              '',
+              '**Android:** Enable "Install from unknown sources" for your file manager, then tap the APK to install.',
+              '**iOS:** open the app URL in Safari and use Share → Add to Home Screen (no separate iOS build).',
+              '**macOS note:** Right-click the app → Open the first time to bypass the unsigned app warning.',
+              '**All platforms:** Tailscale must be installed and connected, and you log in with the same account as Quarc Music.',
+            ].join('\n');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Quarc Notes ${tag}`,
+              body,
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  build:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            label: Windows
+          - platform: macos-latest
+            label: macOS (Apple Silicon)
+            rust-target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            label: macOS (Intel)
+            rust-target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            label: Linux
+
+    name: Build — ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Set desktop version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: desktop/src-tauri
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          node -e "const fs=require('fs'),c=JSON.parse(fs.readFileSync('tauri.conf.json','utf8'));c.version='${TAG}';fs.writeFileSync('tauri.conf.json',JSON.stringify(c,null,2)+'\n')"
+
+      - name: Build and upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args || '' }}
+
+  build-android:
+    needs: create-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Build frontend for Android (bundled, points to server)
+        working-directory: frontend
+        env:
+          VITE_API_URL: https://quarcnet0.tail84500c.ts.net:4001
+        run: npm run build
+
+      - name: Copy frontend build into Capacitor web dir
+        run: cp -r frontend/dist/* mobile/www/
+
+      - name: Install Capacitor dependencies
+        working-directory: mobile
+        run: npm install
+
+      - name: Sync Capacitor
+        working-directory: mobile
+        run: npx cap sync android
+
+      - name: Set version from tag
+        working-directory: mobile/android
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          CODE=$(echo $TAG | tr -d '.')
+          sed -i "s/versionCode [0-9]*/versionCode $CODE/" app/build.gradle
+          sed -i "s/versionName \"[^\"]*\"/versionName \"$TAG\"/" app/build.gradle
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > mobile/android/app/release.keystore
+
+      - name: Build signed release APK
+        working-directory: mobile/android
+        env:
+          KEYSTORE_PATH: release.keystore
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: quarc-notes
+          KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: chmod +x gradlew && ./gradlew assembleRelease
+
+      - name: Upload APK to release
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const data = fs.readFileSync('mobile/android/app/build/outputs/apk/release/app-release.apk');
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: parseInt(process.env.RELEASE_ID),
+              name: 'Quarc-Notes-Android.apk',
+              data,
+            });
+
+  publish-release:
+    needs: [create-release, build, build-android]
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: process.env.RELEASE_ID,
+              draft: false,
+            });
