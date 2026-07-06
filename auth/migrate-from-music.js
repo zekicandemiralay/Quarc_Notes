@@ -48,3 +48,11 @@ console.log(`Migrated ${migrated} user(s), skipped ${skipped} already-existing u
 // Only now fall back to auto-creating an admin, and only if nothing (including
 // what we just migrated) already has the admin role.
 ensureAdmin(authDb);
+
+// Checkpoint WAL into the main db file and close cleanly before the process
+// exits, so the very next process to open this file (the real server,
+// started right after this script) sees a fully merged, non-WAL file rather
+// than relying on it finding stray -wal/-shm sidecar files.
+authDb.pragma('wal_checkpoint(TRUNCATE)');
+authDb.close();
+musicDb.close();
