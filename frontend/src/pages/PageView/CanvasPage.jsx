@@ -26,7 +26,7 @@ export default function CanvasPage({ page, onChange }) {
       ctx.fillStyle = stroke.color || '#1f2937';
       ctx.fill(path);
     }
-    if (drawing.current) {
+    if (drawing.current && !drawing.current.erasing) {
       const path = strokeToPath2D(
         drawing.current.points.map((p) => [p.x, p.y, p.pressure]),
         { ...STROKE_OPTIONS, size: drawing.current.size }
