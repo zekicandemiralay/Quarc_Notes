@@ -14,8 +14,7 @@ const PAGE_SIZES = {
 
 const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined' };
 
-const LINE_HEIGHT = 28;
-const GRID_SIZE = 28;
+const CELL_SIZE = 28; // base spacing (scene px, at zoom 1) for both lined and squared patterns
 
 // Excalidraw's own freedraw renderer computes perfect-freehand's `size` as
 // strokeWidth * 4.25 (confirmed by reading its source). Without accounting
@@ -32,22 +31,27 @@ const PEN_SIZES = [
 
 const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
 
-function pageBackgroundStyle(pageStyle) {
+// The pattern's own repeating image never changes — only its position/size
+// do, and those are driven straight from Excalidraw's scroll/zoom (see
+// syncBackground below) so the "paper" pans and zooms together with the ink
+// instead of sitting on a separate, static layer underneath it.
+function patternImage(pageStyle) {
   if (pageStyle === 'lined') {
-    return {
-      backgroundColor: '#fff',
-      backgroundImage: `repeating-linear-gradient(to bottom, transparent, transparent ${LINE_HEIGHT - 1}px, #d6e4f0 ${LINE_HEIGHT - 1}px, #d6e4f0 ${LINE_HEIGHT}px)`,
-    };
+    return `repeating-linear-gradient(to bottom, transparent, transparent ${CELL_SIZE - 1}px, #d6e4f0 ${CELL_SIZE - 1}px, #d6e4f0 ${CELL_SIZE}px)`;
   }
   if (pageStyle === 'squared') {
-    return {
-      backgroundColor: '#fff',
-      backgroundImage:
-        `repeating-linear-gradient(to bottom, transparent, transparent ${GRID_SIZE - 1}px, #e2e8f0 ${GRID_SIZE - 1}px, #e2e8f0 ${GRID_SIZE}px),` +
-        `repeating-linear-gradient(to right, transparent, transparent ${GRID_SIZE - 1}px, #e2e8f0 ${GRID_SIZE - 1}px, #e2e8f0 ${GRID_SIZE}px)`,
-    };
+    return (
+      `repeating-linear-gradient(to bottom, transparent, transparent ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE}px),` +
+      `repeating-linear-gradient(to right, transparent, transparent ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE}px)`
+    );
   }
-  return { backgroundColor: '#fff' };
+  return 'none';
+}
+
+function patternSize(pageStyle, cellPx) {
+  if (pageStyle === 'lined') return `100% ${cellPx}px`;
+  if (pageStyle === 'squared') return `${cellPx}px ${cellPx}px, ${cellPx}px ${cellPx}px`;
+  return 'auto';
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
@@ -66,8 +70,27 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const overlayCanvasRef = useRef(null);
+  const backgroundRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
   const saveTimer = useRef(null);
+
+  // Keeps the paper pattern (lined/squared) glued to the same scene
+  // coordinates as the ink, instead of it being a static layer the content
+  // slides around on top of. Driven directly off Excalidraw's own
+  // scroll/zoom state via onScrollChange — written straight to the DOM
+  // (not React state) since it can fire on every frame of a pan/zoom gesture.
+  function syncBackground(scrollX, scrollY, zoomValue, pageStyle = settings.pageStyle) {
+    const bg = backgroundRef.current;
+    if (!bg) return;
+    const cellPx = CELL_SIZE * zoomValue;
+    bg.style.backgroundImage = patternImage(pageStyle);
+    bg.style.backgroundSize = patternSize(pageStyle, cellPx);
+    bg.style.backgroundPosition = `${scrollX * zoomValue}px ${scrollY * zoomValue}px`;
+  }
+
+  function handleScrollChange(scrollX, scrollY, zoom) {
+    syncBackground(scrollX, scrollY, zoom.value);
+  }
 
   const initialData = useMemo(() => {
     const raw = page.ink_json;
@@ -76,11 +99,15 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       // Persist the converted format immediately so we don't reconvert (and
       // don't lose it) on the next load.
       onChange(converted);
-      return converted;
+      return { ...converted, appState: { ...converted.appState, activeTool: { type: 'freedraw' } } };
     }
     return {
       elements: raw?.elements || [],
-      appState: { viewBackgroundColor: 'transparent', ...(raw?.appState || {}) },
+      // Setting activeTool here (applied through Excalidraw's own initial
+      // state restore) is what actually makes "pen selected by default"
+      // reliable — an imperative setActiveTool() call after mount races
+      // against Excalidraw's own post-mount setup and isn't deterministic.
+      appState: { viewBackgroundColor: 'transparent', ...(raw?.appState || {}), activeTool: { type: 'freedraw' } },
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
@@ -104,19 +131,19 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   function handleExcalidrawAPI(api) {
     excalidrawAPIRef.current = api;
-    // Pen selected by default — open a fresh drawing ready to write on.
-    // Deferred a tick: Excalidraw's own post-mount initialization can
-    // otherwise race with (and win over) an immediate call here.
-    setTimeout(() => {
-      api.setActiveTool({ type: 'freedraw' });
-      setActiveToolType('freedraw');
-    }, 0);
+    const appState = api.getAppState();
+    syncBackground(appState.scrollX, appState.scrollY, appState.zoom.value);
   }
 
   function updateSettings(patch) {
     const next = { ...settings, ...patch };
     setSettings(next);
     onSettingsChange(next);
+    const api = excalidrawAPIRef.current;
+    if (api) {
+      const appState = api.getAppState();
+      syncBackground(appState.scrollX, appState.scrollY, appState.zoom.value, next.pageStyle);
+    }
   }
 
   function resizeOverlay() {
@@ -318,8 +345,8 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       <div className="flex flex-1 items-center justify-center overflow-auto p-4">
         <div
           ref={containerRefCallback}
-          className={`quarc-canvas-page relative min-w-0 shadow-xl ${isPenActive ? 'quarc-pen-active' : ''}`}
-          style={{ aspectRatio: size.ratio, height: '100%', maxWidth: '100%', touchAction: isPenActive ? 'none' : 'auto', ...pageBackgroundStyle(settings.pageStyle) }}
+          className={`quarc-canvas-page relative min-w-0 overflow-hidden bg-white shadow-xl ${isPenActive ? 'quarc-pen-active' : ''}`}
+          style={{ aspectRatio: size.ratio, height: '100%', maxWidth: '100%', touchAction: isPenActive ? 'none' : 'auto' }}
           onPointerDownCapture={handlePointerDownCapture}
           onPointerMoveCapture={handlePointerMoveCapture}
           onPointerUpCapture={handlePointerUpCapture}
@@ -329,11 +356,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
             .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
             .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
           `}</style>
+          <div ref={backgroundRef} className="pointer-events-none absolute inset-0" />
           <Excalidraw
             key={page.id}
             excalidrawAPI={handleExcalidrawAPI}
             initialData={initialData}
             onChange={handleExcalidrawChange}
+            onScrollChange={handleScrollChange}
             theme="light"
           />
           <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0" />

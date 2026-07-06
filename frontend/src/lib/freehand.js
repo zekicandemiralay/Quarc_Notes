@@ -14,11 +14,19 @@ export function strokeToPath2D(points, options) {
   return path;
 }
 
+// Matches Excalidraw's own freedraw rendering options exactly (confirmed by
+// reading its source) — including the `easing` curve, which we were missing
+// before. Without it, our live preview (plain/linear pressure response) and
+// Excalidraw's committed render (eased response) diverge: moderate pressure
+// values render visibly thicker under Excalidraw's sin-based easing than
+// under our old default, so a stroke that looked right while drawing still
+// thickened slightly the instant it was committed.
 export const STROKE_OPTIONS = {
   size: 3,
   thinning: 0.6,
   smoothing: 0.5,
   streamline: 0.5,
+  easing: (t) => Math.sin((t * Math.PI) / 2),
 };
 
 export function distanceToStroke(stroke, x, y) {
