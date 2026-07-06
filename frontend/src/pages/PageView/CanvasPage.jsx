@@ -17,6 +17,21 @@ const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined' };
 const LINE_HEIGHT = 28;
 const GRID_SIZE = 28;
 
+// Excalidraw's own freedraw renderer computes perfect-freehand's `size` as
+// strokeWidth * 4.25 (confirmed by reading its source). Without accounting
+// for that, a stroke that looks right in our live preview renders ~4.25x
+// thicker the instant it's committed to the scene.
+const EXCALIDRAW_FREEDRAW_SIZE_FACTOR = 4.25;
+
+const PEN_SIZES = [
+  { size: 2, dot: 6 },
+  { size: 4, dot: 9 },
+  { size: 7, dot: 13 },
+  { size: 12, dot: 18 },
+];
+
+const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
+
 function pageBackgroundStyle(pageStyle) {
   if (pageStyle === 'lined') {
     return {
@@ -39,12 +54,15 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState(page.canvas_settings || DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
-  // Pen mode = our own reliable pressure-capture path (real e.pressure, gated
-  // on pointerType === 'pen'), bypassing Excalidraw's own freedraw pressure
-  // heuristic, which decides "simulate vs. real" from a single sample at
-  // pointer-down and is unreliable across real stylus hardware. Off = normal
-  // Excalidraw tools (select/shapes/text/eraser/its own pencil for mouse).
-  const [penMode, setPenMode] = useState(true);
+  const [showPenOptions, setShowPenOptions] = useState(false);
+  // Mirrors Excalidraw's own active tool. Our reliable pressure-capture path
+  // only takes over pen input while Excalidraw's own "freedraw" tool is
+  // selected — for every other tool (select/shapes/text/eraser), pen input
+  // passes straight through to Excalidraw's native handling untouched. This
+  // is what makes the eraser (and select/move) work correctly with a stylus.
+  const [activeToolType, setActiveToolType] = useState('freedraw');
+  const [penSize, setPenSize] = useState(4);
+  const [penColor, setPenColor] = useState(PEN_COLORS[0]);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const overlayCanvasRef = useRef(null);
@@ -79,11 +97,20 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     }, 500);
   }
 
-  function handleExcalidrawChange() {
-    // Fires for changes made via Excalidraw's own tools (shapes/text/select/
-    // move/erase/its own pencil) — our custom pen path saves separately since
-    // it mutates the scene imperatively via updateScene, below.
+  function handleExcalidrawChange(_elements, appState) {
+    if (appState?.activeTool?.type) setActiveToolType(appState.activeTool.type);
     scheduleSave();
+  }
+
+  function handleExcalidrawAPI(api) {
+    excalidrawAPIRef.current = api;
+    // Pen selected by default — open a fresh drawing ready to write on.
+    // Deferred a tick: Excalidraw's own post-mount initialization can
+    // otherwise race with (and win over) an immediate call here.
+    setTimeout(() => {
+      api.setActiveTool({ type: 'freedraw' });
+      setActiveToolType('freedraw');
+    }, 0);
   }
 
   function updateSettings(patch) {
@@ -136,15 +163,19 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     };
   }
 
-  // Capture phase on the page container: only ever intercepts real pen
-  // input while pen mode is on. Touch/mouse pointers are never touched here
-  // (no stopPropagation), so they fall through to Excalidraw untouched —
-  // that's what gives us native 1-finger pan / 2-finger pinch-zoom for free.
+  const isPenActive = activeToolType === 'freedraw';
+
+  // Capture phase on the page container: only ever intercepts real pen input
+  // while Excalidraw's own active tool is "freedraw". Touch/mouse pointers,
+  // and pen input while any OTHER tool (select/eraser/shapes) is active, are
+  // never touched here (no stopPropagation), so they fall through to
+  // Excalidraw untouched — that's what gives us native 1-finger pan /
+  // 2-finger pinch-zoom, and a working eraser, for free.
   function handlePointerDownCapture(e) {
-    if (!penMode || e.pointerType !== 'pen') return;
+    if (!isPenActive || e.pointerType !== 'pen') return;
     e.stopPropagation();
     e.preventDefault();
-    drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: '#1f2937', size: 3 };
+    drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: penColor, size: penSize };
   }
 
   function handlePointerMoveCapture(e) {
@@ -187,7 +218,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const element = strokeToFreedrawElement({
       points: scenePoints,
       color: stroke.color,
-      size: stroke.size / (appState.zoom?.value || 1),
+      size: stroke.size / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * (appState.zoom?.value || 1)),
       simulatePressure: false,
     });
 
@@ -199,62 +230,108 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   return (
     <div className="relative flex h-full flex-col bg-neutral-200 dark:bg-neutral-950">
-      <div className="flex items-center gap-2 border-b border-neutral-300 bg-neutral-100 p-2 dark:border-neutral-700 dark:bg-neutral-900">
-        <button
-          className={`rounded px-2 py-1 text-sm font-medium ${penMode ? 'bg-accent text-white' : 'hover:bg-neutral-200 dark:hover:bg-neutral-700'}`}
-          onClick={() => setPenMode((v) => !v)}
-          title={t('canvas.penModeHint')}
-        >
-          ✏️ {t('canvas.penMode')}
-        </button>
-        <button
-          className="rounded px-2 py-1 text-sm hover:bg-neutral-200 dark:hover:bg-neutral-700"
-          onClick={() => setShowSettings((s) => !s)}
-        >
-          ⚙️ {t('canvas.pageSettings')}
-        </button>
-        {showSettings && (
-          <div className="flex items-center gap-3 text-sm">
-            <label className="flex items-center gap-1">
-              {t('canvas.pageSize')}
-              <select
-                className="rounded border border-neutral-300 bg-transparent px-1 py-0.5 dark:border-neutral-600"
-                value={settings.pageSize}
-                onChange={(e) => updateSettings({ pageSize: e.target.value })}
-              >
-                {Object.entries(PAGE_SIZES).map(([key, v]) => (
-                  <option key={key} value={key}>{v.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="flex items-center gap-1">
-              {t('canvas.pageStyle')}
-              <select
-                className="rounded border border-neutral-300 bg-transparent px-1 py-0.5 dark:border-neutral-600"
-                value={settings.pageStyle}
-                onChange={(e) => updateSettings({ pageStyle: e.target.value })}
-              >
-                <option value="lined">{t('canvas.lined')}</option>
-                <option value="squared">{t('canvas.squared')}</option>
-                <option value="empty">{t('canvas.empty')}</option>
-              </select>
-            </label>
+      <div className="flex items-center gap-2 border-b border-neutral-300 bg-gradient-to-r from-amber-50 to-orange-50 p-2.5 dark:border-neutral-700 dark:from-neutral-900 dark:to-neutral-900">
+        {isPenActive && (
+          <div className="relative">
+            <button
+              className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
+              onClick={() => setShowPenOptions((s) => !s)}
+            >
+              <span className="inline-block h-3.5 w-3.5 rounded-full ring-1 ring-black/10" style={{ backgroundColor: penColor }} />
+              {t('canvas.penOptions')}
+            </button>
+            {showPenOptions && (
+              <div className="absolute left-0 top-full z-10 mt-2 w-60 rounded-xl bg-white p-3 shadow-lg ring-1 ring-neutral-200 dark:bg-neutral-800 dark:ring-neutral-700">
+                <div className="mb-1.5 text-xs font-medium text-neutral-400">{t('canvas.penSize')}</div>
+                <div className="mb-3 flex gap-2">
+                  {PEN_SIZES.map((p) => (
+                    <button
+                      key={p.size}
+                      onClick={() => setPenSize(p.size)}
+                      className={`flex h-10 flex-1 items-center justify-center rounded-lg transition ${
+                        penSize === p.size ? 'bg-accent' : 'bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-700'
+                      }`}
+                    >
+                      <span
+                        className="rounded-full"
+                        style={{
+                          width: p.dot,
+                          height: p.dot,
+                          backgroundColor: penSize === p.size ? '#fff' : penColor,
+                        }}
+                      />
+                    </button>
+                  ))}
+                </div>
+                <div className="mb-1.5 text-xs font-medium text-neutral-400">{t('canvas.penColor')}</div>
+                <div className="flex gap-2">
+                  {PEN_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setPenColor(c)}
+                      className={`h-7 w-7 rounded-full ring-2 transition ${penColor === c ? 'ring-accent' : 'ring-transparent hover:ring-neutral-300'}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
+        <div className="relative">
+          <button
+            className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
+            onClick={() => setShowSettings((s) => !s)}
+          >
+            📄 {t('canvas.pageSettings')}
+          </button>
+          {showSettings && (
+            <div className="absolute left-0 top-full z-10 mt-2 w-60 rounded-xl bg-white p-3 shadow-lg ring-1 ring-neutral-200 dark:bg-neutral-800 dark:ring-neutral-700">
+              <label className="mb-3 block text-sm">
+                <span className="mb-1 block text-xs font-medium text-neutral-400">{t('canvas.pageSize')}</span>
+                <select
+                  className="w-full rounded-lg border border-neutral-300 bg-transparent px-2 py-1.5 dark:border-neutral-600"
+                  value={settings.pageSize}
+                  onChange={(e) => updateSettings({ pageSize: e.target.value })}
+                >
+                  {Object.entries(PAGE_SIZES).map(([key, v]) => (
+                    <option key={key} value={key}>{v.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs font-medium text-neutral-400">{t('canvas.pageStyle')}</span>
+                <select
+                  className="w-full rounded-lg border border-neutral-300 bg-transparent px-2 py-1.5 dark:border-neutral-600"
+                  value={settings.pageStyle}
+                  onChange={(e) => updateSettings({ pageStyle: e.target.value })}
+                >
+                  <option value="lined">{t('canvas.lined')}</option>
+                  <option value="squared">{t('canvas.squared')}</option>
+                  <option value="empty">{t('canvas.empty')}</option>
+                </select>
+              </label>
+            </div>
+          )}
+        </div>
       </div>
       <div className="flex flex-1 items-center justify-center overflow-auto p-4">
         <div
           ref={containerRefCallback}
-          className="relative min-w-0 shadow-xl"
-          style={{ aspectRatio: size.ratio, height: '100%', maxWidth: '100%', ...pageBackgroundStyle(settings.pageStyle), touchAction: penMode ? 'none' : 'auto' }}
+          className={`quarc-canvas-page relative min-w-0 shadow-xl ${isPenActive ? 'quarc-pen-active' : ''}`}
+          style={{ aspectRatio: size.ratio, height: '100%', maxWidth: '100%', touchAction: isPenActive ? 'none' : 'auto', ...pageBackgroundStyle(settings.pageStyle) }}
           onPointerDownCapture={handlePointerDownCapture}
           onPointerMoveCapture={handlePointerMoveCapture}
           onPointerUpCapture={handlePointerUpCapture}
           onPointerLeave={handlePointerUpCapture}
         >
+          <style>{`
+            .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
+            .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
+          `}</style>
           <Excalidraw
             key={page.id}
-            excalidrawAPI={(api) => { excalidrawAPIRef.current = api; }}
+            excalidrawAPI={handleExcalidrawAPI}
             initialData={initialData}
             onChange={handleExcalidrawChange}
             theme="light"

@@ -29,8 +29,9 @@
     "deleteForever": "Delete forever"
   },
   "canvas": {
-    "penMode": "Pen",
-    "penModeHint": "Real pressure-sensitive handwriting with a stylus. Turn off to use Excalidraw's shapes, text, select, and eraser tools.",
+    "penOptions": "Pen",
+    "penSize": "Size",
+    "penColor": "Color",
     "pageSettings": "Page settings",
     "pageSize": "Size",
     "pageStyle": "Style",

@@ -29,8 +29,9 @@
     "deleteForever": "Kalıcı olarak sil"
   },
   "canvas": {
-    "penMode": "Kalem",
-    "penModeHint": "Kalemle gerçek basınç duyarlı el yazısı. Excalidraw'ın şekil, metin, seçim ve silgi araçlarını kullanmak için kapatın.",
+    "penOptions": "Kalem",
+    "penSize": "Boyut",
+    "penColor": "Renk",
     "pageSettings": "Sayfa ayarları",
     "pageSize": "Boyut",
     "pageStyle": "Stil",
