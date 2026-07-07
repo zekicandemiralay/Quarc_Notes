@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { useTranslation } from 'react-i18next';
@@ -87,6 +87,22 @@ function redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, c
   ctx.restore();
 }
 
+// Standard ray-casting point-in-polygon test, used by the lasso tool to
+// decide which elements fall inside the freeform loop the user drew — an
+// element counts as "inside" if its own center point is.
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ...(page.canvas_settings || {}) });
@@ -102,6 +118,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // and style) so reopening a page picks up the last pen you used on it.
   const [penSize, setPenSizeState] = useState(settings.penSize);
   const [penColor, setPenColorState] = useState(settings.penColor);
+  // Custom freeform selection tool — Excalidraw only ships rectangular
+  // marquee selection natively. While active, Excalidraw's own tool is
+  // forced to "selection" (so the group box/resize handles it draws for
+  // whatever we select work normally), and we capture the drag ourselves
+  // to draw the loop and compute the selection instead of letting
+  // Excalidraw's own marquee-select run.
+  const [lassoMode, setLassoMode] = useState(false);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const resizeObserverRef = useRef(null);
@@ -109,6 +132,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const pageRef = useRef(null);
   const patternCanvasRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
+  const lassoDrawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY}] }
   const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
   const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
   const pinchTrack = useRef(null); // { startDist, startMidX, startMidY, startZoom, startScrollX, startScrollY }
@@ -204,6 +228,22 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     scheduleSave();
   }
 
+  // Picking any tool other than selection (pen, eraser, a shape, ...) means
+  // the user is done lassoing — leaving lassoMode on while e.g. freedraw is
+  // active would be confusing, since freedraw's own pen capture already
+  // takes priority.
+  useEffect(() => {
+    if (activeToolType !== 'selection') setLassoMode(false);
+  }, [activeToolType]);
+
+  function toggleLasso() {
+    setLassoMode((prev) => {
+      const next = !prev;
+      if (next) excalidrawAPIRef.current?.setActiveTool({ type: 'selection' });
+      return next;
+    });
+  }
+
   function handleExcalidrawAPI(api) {
     excalidrawAPIRef.current = api;
     const appState = api.getAppState();
@@ -272,13 +312,30 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
-    if (!drawing.current || drawing.current.points.length < 2) return;
-    const path = strokeToPath2D(
-      drawing.current.points.map((p) => [p.x, p.y, p.pressure]),
-      { ...STROKE_OPTIONS, size: drawing.current.size }
-    );
-    ctx.fillStyle = drawing.current.color;
-    ctx.fill(path);
+    if (drawing.current && drawing.current.points.length >= 2) {
+      const path = strokeToPath2D(
+        drawing.current.points.map((p) => [p.x, p.y, p.pressure]),
+        { ...STROKE_OPTIONS, size: drawing.current.size }
+      );
+      ctx.fillStyle = drawing.current.color;
+      ctx.fill(path);
+      return;
+    }
+    if (lassoDrawing.current && lassoDrawing.current.points.length >= 2) {
+      const pts = lassoDrawing.current.points;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#6965db';
+      ctx.fillStyle = 'rgba(105, 101, 219, 0.08)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // The page/lines overlay is only ever resynced in response to Excalidraw's
@@ -392,6 +449,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // through to Excalidraw natively; that's what gives us a working eraser
   // and select/move for free.
   function handlePointerDownCapture(e) {
+    if (lassoMode) {
+      if (lassoDrawing.current) return; // already lassoing with another pointer — ignore
+      e.stopPropagation();
+      e.preventDefault();
+      lassoDrawing.current = { pointerId: e.pointerId, points: [getPoint(e)] };
+      return;
+    }
     if (e.pointerType === 'pen') {
       if (!isPenActive) return;
       e.stopPropagation();
@@ -481,6 +545,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   }
 
   function handlePointerMoveCapture(e) {
+    if (lassoDrawing.current && e.pointerId === lassoDrawing.current.pointerId) {
+      e.stopPropagation();
+      e.preventDefault();
+      lassoDrawing.current.points.push(getPoint(e));
+      redrawOverlay();
+      return;
+    }
     if (drawing.current && e.pointerId === drawing.current.pointerId) {
       e.stopPropagation();
       e.preventDefault();
@@ -508,6 +579,12 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   }
 
   function handlePointerUpCapture(e) {
+    if (lassoDrawing.current && e.pointerId === lassoDrawing.current.pointerId) {
+      e.stopPropagation();
+      e.preventDefault();
+      finalizeLasso();
+      return;
+    }
     if (drawing.current && e.pointerId === drawing.current.pointerId) {
       e.stopPropagation();
       e.preventDefault();
@@ -560,6 +637,39 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const { scrollX, scrollY } = clampScroll(0, 0, zoomValue, rect);
     api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
     syncPage(scrollX, scrollY, zoomValue);
+  }
+
+  // Converts the drawn freeform loop to scene coordinates and selects every
+  // element whose center falls inside it — then leaves Excalidraw's own
+  // "selection" tool to take over from there (its usual group box/resize
+  // handles/drag-to-move-together UI works on whatever we select here, same
+  // as if the user had made a rectangular marquee selection).
+  function finalizeLasso() {
+    const lasso = lassoDrawing.current;
+    lassoDrawing.current = null;
+    redrawOverlay();
+    if (!lasso || lasso.points.length < 3) return;
+
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+    const appState = api.getAppState();
+    const rect = containerRef.current.getBoundingClientRect();
+    const sceneOpts = {
+      zoom: appState.zoom,
+      offsetLeft: rect.left,
+      offsetTop: rect.top,
+      scrollX: appState.scrollX,
+      scrollY: appState.scrollY,
+    };
+    const scenePolygon = lasso.points.map((p) => viewportCoordsToSceneCoords({ clientX: p.clientX, clientY: p.clientY }, sceneOpts));
+
+    const selectedElementIds = {};
+    for (const el of api.getSceneElements()) {
+      const cx = el.x + el.width / 2;
+      const cy = el.y + el.height / 2;
+      if (pointInPolygon(cx, cy, scenePolygon)) selectedElementIds[el.id] = true;
+    }
+    api.updateScene({ appState: { selectedElementIds, selectedGroupIds: {} } });
   }
 
   function finalizeStroke() {
@@ -645,6 +755,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
             )}
           </div>
         )}
+        <button
+          className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium shadow-sm ring-1 transition ${
+            lassoMode
+              ? 'bg-accent text-white ring-accent'
+              : 'bg-white text-neutral-700 ring-neutral-200 hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700'
+          }`}
+          onClick={toggleLasso}
+        >
+          ✂️ {t('canvas.lasso')}
+        </button>
         <div className="relative">
           <button
             className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
@@ -685,7 +805,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       <div
         ref={containerRefCallback}
         className={`quarc-canvas-page relative flex-1 overflow-hidden bg-neutral-300 dark:bg-neutral-800 ${isPenActive ? 'quarc-pen-active' : ''}`}
-        style={{ touchAction: isPenActive ? 'none' : 'auto' }}
+        style={{ touchAction: isPenActive || lassoMode ? 'none' : 'auto' }}
         onPointerDownCapture={handlePointerDownCapture}
         onPointerMoveCapture={handlePointerMoveCapture}
         onPointerUpCapture={handlePointerUpCapture}
