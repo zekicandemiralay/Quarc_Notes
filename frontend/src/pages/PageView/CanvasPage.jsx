@@ -84,6 +84,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const [penColor, setPenColorState] = useState(settings.penColor);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
+  const resizeObserverRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const pageRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
@@ -227,9 +228,39 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     ctx.fill(path);
   }
 
+  // The page/lines overlay is only ever resynced in response to Excalidraw's
+  // own onScrollChange — but the *container* can also resize on its own
+  // (mobile browser chrome hiding/showing as you start interacting with the
+  // page, on-screen keyboard, orientation change), independent of any
+  // scroll/zoom change. Without this, the page/lines div can end up sized
+  // for a stale container rect while Excalidraw's own canvas has already
+  // resized to the new one, so they drift apart — this is what watches for
+  // that and keeps them locked together no matter what caused the resize.
   function containerRefCallback(el) {
     containerRef.current = el;
-    if (el) requestAnimationFrame(resizeOverlay);
+    if (resizeObserverRef.current) {
+      resizeObserverRef.current.disconnect();
+      resizeObserverRef.current = null;
+    }
+    if (!el) return;
+    requestAnimationFrame(resizeOverlay);
+    resizeObserverRef.current = new ResizeObserver(() => {
+      resizeOverlay();
+      resyncPageToCurrentState();
+    });
+    resizeObserverRef.current.observe(el);
+  }
+
+  function resyncPageToCurrentState() {
+    const api = excalidrawAPIRef.current;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!api || !rect || !rect.width || !rect.height) return;
+    const appState = api.getAppState();
+    const { scrollX, scrollY } = clampScroll(appState.scrollX, appState.scrollY, appState.zoom.value, rect);
+    if (scrollX !== appState.scrollX || scrollY !== appState.scrollY) {
+      api.updateScene({ appState: { scrollX, scrollY } });
+    }
+    syncPage(scrollX, scrollY, appState.zoom.value);
   }
 
   function getPoint(e) {
