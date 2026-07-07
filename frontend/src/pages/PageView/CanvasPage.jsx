@@ -87,8 +87,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const overlayCanvasRef = useRef(null);
   const pageRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
+  const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
   const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
-  const activeTouchIds = useRef(new Set());
+  const pinchTrack = useRef(null); // { startDist, startMidX, startMidY, startZoom, startScrollX, startScrollY }
   const lastTap = useRef(null); // { time, x, y } — for double-tap-to-fit detection
   const saveTimer = useRef(null);
 
@@ -244,24 +245,35 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   const isPenActive = activeToolType === 'freedraw';
 
+  // The smallest zoom we ever allow: the page fit to the current viewport.
+  // Below that you'd just be looking at gray space around a tiny page, which
+  // isn't useful — so both the double-tap-to-fit and the pinch gesture below
+  // treat this as a hard floor, not just a default.
+  function computeFitZoom(rect) {
+    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
+    const margin = 48;
+    return Math.min((rect.width - margin) / dims.width, (rect.height - margin) / dims.height);
+  }
+
   // Capture phase on the page container, all only while Excalidraw's own
   // active tool is "freedraw":
   //  - real pen input, which we turn into a properly pressure-captured
   //    freedraw element (see finalizeStroke).
-  //  - a *lone* finger, which does nothing at all — Excalidraw's own
-  //    default is to draw with any single pointer, finger included, when a
-  //    draw tool is active, and to pan with it when a non-draw tool is
-  //    active. Neither is what a notebook app wants: only the pen should
-  //    ever leave ink, and a single finger resting on the page (e.g. the
-  //    heel of your hand while writing) shouldn't nudge the view either.
-  //    Moving the page is a deliberate two-finger gesture, or a double-tap
-  //    to fit it to the screen (see handleTapForDoubleTap/fitPageToScreen).
-  // The moment a second finger joins, we back off entirely (no
-  // stopPropagation for either pointer) and let Excalidraw's native
-  // 2-finger pinch-zoom/pan take over untouched. Everything else — mouse,
-  // and pen/touch while any OTHER tool (select/eraser/shapes) is active —
-  // is never touched here, so it falls through to Excalidraw natively;
-  // that's what gives us a working eraser and select/move for free.
+  //  - touch input, which we handle entirely ourselves rather than letting
+  //    Excalidraw's own touch handling run at all: a *lone* finger does
+  //    nothing (Excalidraw's own default is to draw with any single
+  //    pointer, finger included, when a draw tool is active — not what a
+  //    notebook app wants: only the pen should ever leave ink, and a single
+  //    finger resting on the page, e.g. the heel of your hand while
+  //    writing, shouldn't nudge the view either); two fingers pinch-zoom
+  //    and pan together (see updatePinch), with a hard floor at "page fit
+  //    to screen" — you can zoom in as far as you like, but never out past
+  //    seeing the whole page. A double-tap also fits the page to the
+  //    screen (see handleTapForDoubleTap/fitPageToScreen).
+  // Everything else — mouse, and pen/touch while any OTHER tool
+  // (select/eraser/shapes) is active — is never touched here, so it falls
+  // through to Excalidraw natively; that's what gives us a working eraser
+  // and select/move for free.
   function handlePointerDownCapture(e) {
     if (e.pointerType === 'pen') {
       if (!isPenActive) return;
@@ -271,21 +283,59 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       return;
     }
     if (e.pointerType === 'touch' && isPenActive) {
-      activeTouchIds.current.add(e.pointerId);
-      if (activeTouchIds.current.size > 1) {
+      e.stopPropagation();
+      e.preventDefault();
+      touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPoints.current.size === 1) {
+        touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY };
+        pinchTrack.current = null;
+      } else if (touchPoints.current.size === 2) {
         touchTrack.current = null;
-        return;
+        startPinch();
       }
-      // Deliberately NOT stopping propagation here: Excalidraw needs to see
-      // every touch's pointerdown to register it for a potential pinch a
-      // moment later. If we swallowed it here (like we do for pen), a real
-      // 2-finger pinch — where the two touches almost never land in the
-      // exact same tick — would only ever hand Excalidraw the *second*
-      // finger, and it can't compute a pinch from one registered pointer.
-      // We only start actually intercepting from the first *move* onward,
-      // once we know this is (still) just the one finger.
-      touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY };
     }
+  }
+
+  function startPinch() {
+    const api = excalidrawAPIRef.current;
+    const appState = api?.getAppState();
+    if (!appState) return;
+    const [p1, p2] = [...touchPoints.current.values()];
+    pinchTrack.current = {
+      startDist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
+      startMidX: (p1.x + p2.x) / 2,
+      startMidY: (p1.y + p2.y) / 2,
+      startZoom: appState.zoom.value,
+      startScrollX: appState.scrollX,
+      startScrollY: appState.scrollY,
+    };
+  }
+
+  function updatePinch() {
+    const api = excalidrawAPIRef.current;
+    const rect = containerRef.current?.getBoundingClientRect();
+    const pin = pinchTrack.current;
+    if (!api || !rect || !rect.width || !rect.height || !pin) return;
+    const [p1, p2] = [...touchPoints.current.values()];
+    const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const midX = (p1.x + p2.x) / 2;
+    const midY = (p1.y + p2.y) / 2;
+
+    const fitZoom = computeFitZoom(rect);
+    const rawZoom = pin.startZoom * (dist / pin.startDist);
+    const zoomValue = Math.min(Math.max(rawZoom, fitZoom), 5);
+
+    // Anchor the scene point that was under the gesture's starting midpoint
+    // to the CURRENT midpoint — this is what makes it zoom around where your
+    // fingers are (and pan naturally if the midpoint itself drifts) instead
+    // of always zooming around the page's origin.
+    const sceneAnchorX = (pin.startMidX - rect.left) / pin.startZoom - pin.startScrollX;
+    const sceneAnchorY = (pin.startMidY - rect.top) / pin.startZoom - pin.startScrollY;
+    const scrollX = (midX - rect.left) / zoomValue - sceneAnchorX;
+    const scrollY = (midY - rect.top) / zoomValue - sceneAnchorY;
+
+    api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
+    syncPage(scrollX, scrollY, zoomValue);
   }
 
   function handlePointerMoveCapture(e) {
@@ -296,12 +346,14 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       redrawOverlay();
       return;
     }
-    const track = touchTrack.current;
-    if (track && e.pointerId === track.pointerId && activeTouchIds.current.size === 1) {
-      // A lone finger does nothing — just absorb the input so Excalidraw's
-      // own freedraw tool doesn't draw with it.
+    if (touchPoints.current.has(e.pointerId)) {
       e.stopPropagation();
       e.preventDefault();
+      touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPoints.current.size === 2 && pinchTrack.current) {
+        updatePinch();
+      }
+      // A lone finger (size 1) does nothing beyond absorbing the input.
     }
   }
 
@@ -312,21 +364,14 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       finalizeStroke();
       return;
     }
-    if (e.pointerType === 'touch') {
-      activeTouchIds.current.delete(e.pointerId);
+    if (touchPoints.current.has(e.pointerId)) {
+      e.stopPropagation();
+      e.preventDefault();
+      touchPoints.current.delete(e.pointerId);
       const track = touchTrack.current;
+      if (touchPoints.current.size < 2) pinchTrack.current = null;
       if (track?.pointerId === e.pointerId) {
         touchTrack.current = null;
-        // We let this touch's pointerdown through (see handlePointerDownCapture)
-        // so Excalidraw could register it in case a pinch followed, then
-        // intercepted its moves ourselves once it turned out to be staying
-        // lone. Excalidraw's freedraw tool will have started a 1-point
-        // element from that pointerdown it never got any points for —
-        // swallow the pointerup (so it doesn't try to finalize it) and
-        // clean that stray element up.
-        e.stopPropagation();
-        e.preventDefault();
-        cleanupStrayFreedraw();
         handleTapForDoubleTap(e, track);
       }
     }
@@ -356,24 +401,11 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!api || !rect || !rect.width || !rect.height) return;
     const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
-    const margin = 48;
-    const zoomValue = Math.min((rect.width - margin) / dims.width, (rect.height - margin) / dims.height, 2);
+    const zoomValue = computeFitZoom(rect);
     const scrollX = rect.width / (2 * zoomValue) - dims.width / 2;
     const scrollY = rect.height / (2 * zoomValue) - dims.height / 2;
     api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
     syncPage(scrollX, scrollY, zoomValue);
-  }
-
-  function cleanupStrayFreedraw() {
-    const api = excalidrawAPIRef.current;
-    if (!api) return;
-    const elements = api.getSceneElementsIncludingDeleted();
-    const strayIds = new Set(
-      elements.filter((el) => el.type === 'freedraw' && !el.isDeleted && (el.points?.length || 0) < 2).map((el) => el.id)
-    );
-    if (strayIds.size) {
-      api.updateScene({ elements: elements.map((el) => (strayIds.has(el.id) ? { ...el, isDeleted: true } : el)) });
-    }
   }
 
   function finalizeStroke() {
