@@ -45,42 +45,46 @@ const PEN_SIZES = [
 const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
 
 // Draws the ruled/squared pattern directly with the Canvas 2D API instead
-// of a CSS repeating-gradient background-image scaled via background-size.
-// Both should scale identically in theory, but a CSS-gradient-based pattern
-// gave repeated real-device reports of lines shifting/multiplying while
-// zooming that couldn't be reproduced or root-caused across several rounds
-// of testing (measuring computed background-size against page size showed
-// mathematically exact scaling every time, on every zoom path tried) — so
-// rather than keep chasing a hypothetical browser-specific rendering quirk,
-// this removes the whole class of uncertainty: every line is drawn at an
-// explicit, computed pixel position, with no scaling/interpolation step for
-// the renderer to get wrong.
-function drawPattern(canvas, widthCss, heightCss, cellPx, pageStyle) {
+// of a CSS repeating-gradient background-image scaled via background-size
+// (see the note on resizePatternCanvas below for why this canvas is sized to
+// the *container*, not the page, which is what makes this cheap to redraw on
+// every pan/zoom frame). Both should scale identically in theory, but a
+// CSS-gradient-based pattern gave repeated real-device reports of lines
+// shifting/multiplying while zooming that couldn't be reproduced or
+// root-caused across several rounds of testing (measuring computed
+// background-size against page size showed mathematically exact scaling
+// every time, on every zoom path tried) — so rather than keep chasing a
+// hypothetical browser-specific rendering quirk, this removes the whole
+// class of uncertainty: every line is drawn at an explicit, computed pixel
+// position, with no scaling/interpolation step for the renderer to get
+// wrong. `pageLeft/pageTop/pageWidth/pageHeight` are in the canvas's own
+// (container-relative) coordinates, i.e. the page's on-screen rect.
+function redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, cellPx, pageStyle) {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.round(widthCss * dpr));
-  canvas.height = Math.max(1, Math.round(heightCss * dpr));
-  canvas.style.width = `${widthCss}px`;
-  canvas.style.height = `${heightCss}px`;
   const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, widthCss, heightCss);
+  ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
   if (pageStyle === 'empty' || cellPx <= 0) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pageLeft, pageTop, pageWidth, pageHeight);
+  ctx.clip();
   ctx.strokeStyle = pageStyle === 'squared' ? '#e2e8f0' : '#d6e4f0';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let y = cellPx; y < heightCss; y += cellPx) {
-    const py = Math.round(y) + 0.5;
-    ctx.moveTo(0, py);
-    ctx.lineTo(widthCss, py);
+  for (let y = cellPx; y < pageHeight; y += cellPx) {
+    const py = Math.round(pageTop + y) + 0.5;
+    ctx.moveTo(pageLeft, py);
+    ctx.lineTo(pageLeft + pageWidth, py);
   }
   if (pageStyle === 'squared') {
-    for (let x = cellPx; x < widthCss; x += cellPx) {
-      const px = Math.round(x) + 0.5;
-      ctx.moveTo(px, 0);
-      ctx.lineTo(px, heightCss);
+    for (let x = cellPx; x < pageWidth; x += cellPx) {
+      const px = Math.round(pageLeft + x) + 0.5;
+      ctx.moveTo(px, pageTop);
+      ctx.lineTo(px, pageTop + pageHeight);
     }
   }
   ctx.stroke();
+  ctx.restore();
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
@@ -108,6 +112,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
   const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
   const pinchTrack = useRef(null); // { startDist, startMidX, startMidY, startZoom, startScrollX, startScrollY }
+  const pinchRAF = useRef(null); // requestAnimationFrame handle, coalesces pinch updates to once per frame
   const lastTap = useRef(null); // { time, x, y } — for double-tap-to-fit detection
   const saveTimer = useRef(null);
 
@@ -125,13 +130,22 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const canvas = patternCanvasRef.current;
     if (!el) return;
     const dims = PAGE_SIZES[pageSize] || PAGE_SIZES.A5;
-    const widthCss = dims.width * zoomValue;
-    const heightCss = dims.height * zoomValue;
-    el.style.left = `${scrollX * zoomValue}px`;
-    el.style.top = `${scrollY * zoomValue}px`;
-    el.style.width = `${widthCss}px`;
-    el.style.height = `${heightCss}px`;
-    if (canvas) drawPattern(canvas, widthCss, heightCss, CELL_SIZE * zoomValue, pageStyle);
+    const pageLeft = scrollX * zoomValue;
+    const pageTop = scrollY * zoomValue;
+    const pageWidth = dims.width * zoomValue;
+    const pageHeight = dims.height * zoomValue;
+    el.style.left = `${pageLeft}px`;
+    el.style.top = `${pageTop}px`;
+    el.style.width = `${pageWidth}px`;
+    el.style.height = `${pageHeight}px`;
+    // The pattern canvas is sized to the *container* (see resizePatternCanvas),
+    // not the page, so this is a cheap clear-and-redraw of a few dozen lines —
+    // never a canvas.width/height reallocation, which is what was making
+    // continuous pinch/pan gestures janky (resizing a canvas's backing store
+    // on every pointermove, at page dimensions that can reach several
+    // thousand px at high zoom, is drastically more expensive than redrawing
+    // within a fixed-size buffer).
+    if (canvas) redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, CELL_SIZE * zoomValue, pageStyle);
   }
 
   function handleScrollChange(scrollX, scrollY, zoom) {
@@ -230,6 +244,28 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     canvas.getContext('2d').scale(dpr, dpr);
   }
 
+  // Sized to the container (like the overlay above), not to the page —
+  // this only needs reallocating when the container itself actually
+  // resizes, never on every pan/zoom frame. That's the whole point: a
+  // canvas.width/height reassignment fully clears and reallocates its
+  // backing store, which at page dimensions reaching several thousand px
+  // at high zoom is expensive enough to visibly stutter a continuous pinch
+  // gesture if done on every pointermove. Redrawing within an
+  // already-sized buffer (see redrawPatternCanvas) is just a clear + a few
+  // dozen line draws, regardless of zoom level.
+  function resizePatternCanvas() {
+    const canvas = patternCanvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = container.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    canvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
   function redrawOverlay() {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
@@ -260,9 +296,14 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       resizeObserverRef.current = null;
     }
     if (!el) return;
-    requestAnimationFrame(resizeOverlay);
+    requestAnimationFrame(() => {
+      resizeOverlay();
+      resizePatternCanvas();
+      resyncPageToCurrentState();
+    });
     resizeObserverRef.current = new ResizeObserver(() => {
       resizeOverlay();
+      resizePatternCanvas();
       resyncPageToCurrentState();
     });
     resizeObserverRef.current.observe(el);
@@ -451,8 +492,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       e.stopPropagation();
       e.preventDefault();
       touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (touchPoints.current.size === 2 && pinchTrack.current) {
-        updatePinch();
+      // Touch fires pointermove far faster than the display can paint (up
+      // to 120Hz+ on some tablets). Coalescing to one updatePinch() per
+      // animation frame — using whatever the latest finger positions are by
+      // the time that frame runs — keeps the gesture smooth without doing
+      // redundant work for intermediate samples that never even get drawn.
+      if (touchPoints.current.size === 2 && pinchTrack.current && !pinchRAF.current) {
+        pinchRAF.current = requestAnimationFrame(() => {
+          pinchRAF.current = null;
+          if (touchPoints.current.size === 2 && pinchTrack.current) updatePinch();
+        });
       }
       // A lone finger (size 1) does nothing beyond absorbing the input.
     }
@@ -470,7 +519,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       e.preventDefault();
       touchPoints.current.delete(e.pointerId);
       const track = touchTrack.current;
-      if (touchPoints.current.size < 2) pinchTrack.current = null;
+      if (touchPoints.current.size < 2) {
+        pinchTrack.current = null;
+        if (pinchRAF.current) {
+          cancelAnimationFrame(pinchRAF.current);
+          pinchRAF.current = null;
+        }
+      }
       if (track?.pointerId === e.pointerId) {
         touchTrack.current = null;
         handleTapForDoubleTap(e, track);
@@ -641,9 +696,8 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
           .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
         `}</style>
-        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl">
-          <canvas ref={patternCanvasRef} className="pointer-events-none absolute inset-0" />
-        </div>
+        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl" />
+        <canvas ref={patternCanvasRef} className="pointer-events-none absolute inset-0" />
         <Excalidraw
           key={page.id}
           excalidrawAPI={handleExcalidrawAPI}
