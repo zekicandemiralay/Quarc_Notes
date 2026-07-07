@@ -249,10 +249,38 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // Below that you'd just be looking at gray space around a tiny page, which
   // isn't useful — so both the double-tap-to-fit and the pinch gesture below
   // treat this as a hard floor, not just a default.
+  const FIT_MARGIN = 48; // screen px of buffer around the page at fit zoom
+
   function computeFitZoom(rect) {
     const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
-    const margin = 48;
-    return Math.min((rect.width - margin) / dims.width, (rect.height - margin) / dims.height);
+    return Math.min((rect.width - FIT_MARGIN) / dims.width, (rect.height - FIT_MARGIN) / dims.height);
+  }
+
+  // Keeps the page from ever being panned out of view. At exactly fit zoom
+  // there's nowhere to go — scroll is pinned to the single centered
+  // position (matching "shouldn't be able to move it at all" in fit mode).
+  // Above fit zoom, scroll is clamped so the page can never be dragged more
+  // than FIT_MARGIN screen px past either edge of the viewport, the same
+  // small buffer already visible at fit zoom.
+  function clampScroll(scrollX, scrollY, zoomValue, rect) {
+    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
+    const fitZoom = computeFitZoom(rect);
+    if (zoomValue <= fitZoom + 1e-6) {
+      return {
+        scrollX: rect.width / (2 * fitZoom) - dims.width / 2,
+        scrollY: rect.height / (2 * fitZoom) - dims.height / 2,
+      };
+    }
+    const clampAxis = (scroll, viewportSize, pageSize) => {
+      const minScroll = (viewportSize - FIT_MARGIN) / zoomValue - pageSize;
+      const maxScroll = FIT_MARGIN / zoomValue;
+      if (minScroll > maxScroll) return viewportSize / (2 * zoomValue) - pageSize / 2; // no room to pan on this axis — stay centered
+      return Math.min(Math.max(scroll, minScroll), maxScroll);
+    };
+    return {
+      scrollX: clampAxis(scrollX, rect.width, dims.width),
+      scrollY: clampAxis(scrollY, rect.height, dims.height),
+    };
   }
 
   // Capture phase on the page container, all only while Excalidraw's own
@@ -302,15 +330,22 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     if (!appState) return;
     const [p1, p2] = [...touchPoints.current.values()];
     pinchTrack.current = {
-      startDist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
-      startMidX: (p1.x + p2.x) / 2,
-      startMidY: (p1.y + p2.y) / 2,
-      startZoom: appState.zoom.value,
-      startScrollX: appState.scrollX,
-      startScrollY: appState.scrollY,
+      prevDist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
+      prevMidX: (p1.x + p2.x) / 2,
+      prevMidY: (p1.y + p2.y) / 2,
+      zoom: appState.zoom.value,
+      scrollX: appState.scrollX,
+      scrollY: appState.scrollY,
     };
   }
 
+  // Incremental (frame-to-frame), not anchored to the gesture's start: each
+  // move computes a delta from the *previous* move rather than from a fixed
+  // start snapshot. Real touch input is noisy (a single jittery sample with
+  // near-identical finger positions would send an anchored-to-start version
+  // of this into a wild zoom swing) — incremental tracking means one bad
+  // frame can't throw off the rest of the gesture, since the next good
+  // frame just resumes from wherever it actually is.
   function updatePinch() {
     const api = excalidrawAPIRef.current;
     const rect = containerRef.current?.getBoundingClientRect();
@@ -321,21 +356,39 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const midX = (p1.x + p2.x) / 2;
     const midY = (p1.y + p2.y) / 2;
 
+    // Fingers reporting (near-)identical positions for a frame would make
+    // the zoom ratio blow up or collapse — skip updating zoom/scroll this
+    // frame and just resync the reference point, so the gesture recovers
+    // cleanly on the next good frame instead of jumping.
+    if (dist < 8 || pin.prevDist < 8) {
+      pin.prevDist = dist;
+      pin.prevMidX = midX;
+      pin.prevMidY = midY;
+      return;
+    }
+
     const fitZoom = computeFitZoom(rect);
-    const rawZoom = pin.startZoom * (dist / pin.startDist);
+    const rawZoom = pin.zoom * (dist / pin.prevDist);
     const zoomValue = Math.min(Math.max(rawZoom, fitZoom), 5);
 
-    // Anchor the scene point that was under the gesture's starting midpoint
-    // to the CURRENT midpoint — this is what makes it zoom around where your
-    // fingers are (and pan naturally if the midpoint itself drifts) instead
-    // of always zooming around the page's origin.
-    const sceneAnchorX = (pin.startMidX - rect.left) / pin.startZoom - pin.startScrollX;
-    const sceneAnchorY = (pin.startMidY - rect.top) / pin.startZoom - pin.startScrollY;
-    const scrollX = (midX - rect.left) / zoomValue - sceneAnchorX;
-    const scrollY = (midY - rect.top) / zoomValue - sceneAnchorY;
+    // Anchor the scene point that was under the PREVIOUS frame's midpoint to
+    // the CURRENT midpoint — zooms around where your fingers are, and pans
+    // naturally if the midpoint itself drifts (two-finger pan).
+    const sceneAnchorX = (pin.prevMidX - rect.left) / pin.zoom - pin.scrollX;
+    const sceneAnchorY = (pin.prevMidY - rect.top) / pin.zoom - pin.scrollY;
+    const rawScrollX = (midX - rect.left) / zoomValue - sceneAnchorX;
+    const rawScrollY = (midY - rect.top) / zoomValue - sceneAnchorY;
+    const { scrollX, scrollY } = clampScroll(rawScrollX, rawScrollY, zoomValue, rect);
 
     api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
     syncPage(scrollX, scrollY, zoomValue);
+
+    pin.prevDist = dist;
+    pin.prevMidX = midX;
+    pin.prevMidY = midY;
+    pin.zoom = zoomValue;
+    pin.scrollX = scrollX;
+    pin.scrollY = scrollY;
   }
 
   function handlePointerMoveCapture(e) {
@@ -400,10 +453,8 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const api = excalidrawAPIRef.current;
     const rect = containerRef.current?.getBoundingClientRect();
     if (!api || !rect || !rect.width || !rect.height) return;
-    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
     const zoomValue = computeFitZoom(rect);
-    const scrollX = rect.width / (2 * zoomValue) - dims.width / 2;
-    const scrollY = rect.height / (2 * zoomValue) - dims.height / 2;
+    const { scrollX, scrollY } = clampScroll(0, 0, zoomValue, rect);
     api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
     syncPage(scrollX, scrollY, zoomValue);
   }
