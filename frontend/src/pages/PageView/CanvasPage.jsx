@@ -44,27 +44,43 @@ const PEN_SIZES = [
 
 const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
 
-// The pattern's own repeating image never changes — only its position/size
-// do, and those are driven straight from Excalidraw's scroll/zoom (see
-// syncPage below) so the "paper" pans and zooms together with the ink
-// instead of sitting on a separate, static layer underneath it.
-function patternImage(pageStyle) {
-  if (pageStyle === 'lined') {
-    return `repeating-linear-gradient(to bottom, transparent, transparent ${CELL_SIZE - 1}px, #d6e4f0 ${CELL_SIZE - 1}px, #d6e4f0 ${CELL_SIZE}px)`;
+// Draws the ruled/squared pattern directly with the Canvas 2D API instead
+// of a CSS repeating-gradient background-image scaled via background-size.
+// Both should scale identically in theory, but a CSS-gradient-based pattern
+// gave repeated real-device reports of lines shifting/multiplying while
+// zooming that couldn't be reproduced or root-caused across several rounds
+// of testing (measuring computed background-size against page size showed
+// mathematically exact scaling every time, on every zoom path tried) — so
+// rather than keep chasing a hypothetical browser-specific rendering quirk,
+// this removes the whole class of uncertainty: every line is drawn at an
+// explicit, computed pixel position, with no scaling/interpolation step for
+// the renderer to get wrong.
+function drawPattern(canvas, widthCss, heightCss, cellPx, pageStyle) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(widthCss * dpr));
+  canvas.height = Math.max(1, Math.round(heightCss * dpr));
+  canvas.style.width = `${widthCss}px`;
+  canvas.style.height = `${heightCss}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, widthCss, heightCss);
+  if (pageStyle === 'empty' || cellPx <= 0) return;
+  ctx.strokeStyle = pageStyle === 'squared' ? '#e2e8f0' : '#d6e4f0';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let y = cellPx; y < heightCss; y += cellPx) {
+    const py = Math.round(y) + 0.5;
+    ctx.moveTo(0, py);
+    ctx.lineTo(widthCss, py);
   }
   if (pageStyle === 'squared') {
-    return (
-      `repeating-linear-gradient(to bottom, transparent, transparent ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE}px),` +
-      `repeating-linear-gradient(to right, transparent, transparent ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE - 1}px, #e2e8f0 ${CELL_SIZE}px)`
-    );
+    for (let x = cellPx; x < widthCss; x += cellPx) {
+      const px = Math.round(x) + 0.5;
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, heightCss);
+    }
   }
-  return 'none';
-}
-
-function patternSize(pageStyle, cellPx) {
-  if (pageStyle === 'lined') return `100% ${cellPx}px`;
-  if (pageStyle === 'squared') return `${cellPx}px ${cellPx}px, ${cellPx}px ${cellPx}px`;
-  return 'auto';
+  ctx.stroke();
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
@@ -87,6 +103,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const resizeObserverRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const pageRef = useRef(null);
+  const patternCanvasRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
   const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
   const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
@@ -105,16 +122,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // every frame of a pan/zoom gesture.
   function syncPage(scrollX, scrollY, zoomValue, pageSize = settings.pageSize, pageStyle = settings.pageStyle) {
     const el = pageRef.current;
+    const canvas = patternCanvasRef.current;
     if (!el) return;
     const dims = PAGE_SIZES[pageSize] || PAGE_SIZES.A5;
-    const cellPx = CELL_SIZE * zoomValue;
+    const widthCss = dims.width * zoomValue;
+    const heightCss = dims.height * zoomValue;
     el.style.left = `${scrollX * zoomValue}px`;
     el.style.top = `${scrollY * zoomValue}px`;
-    el.style.width = `${dims.width * zoomValue}px`;
-    el.style.height = `${dims.height * zoomValue}px`;
-    el.style.backgroundImage = patternImage(pageStyle);
-    el.style.backgroundSize = patternSize(pageStyle, cellPx);
-    el.style.backgroundPosition = '0 0';
+    el.style.width = `${widthCss}px`;
+    el.style.height = `${heightCss}px`;
+    if (canvas) drawPattern(canvas, widthCss, heightCss, CELL_SIZE * zoomValue, pageStyle);
   }
 
   function handleScrollChange(scrollX, scrollY, zoom) {
@@ -624,7 +641,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
           .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
         `}</style>
-        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl" />
+        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl">
+          <canvas ref={patternCanvasRef} className="pointer-events-none absolute inset-0" />
+        </div>
         <Excalidraw
           key={page.id}
           excalidrawAPI={handleExcalidrawAPI}
