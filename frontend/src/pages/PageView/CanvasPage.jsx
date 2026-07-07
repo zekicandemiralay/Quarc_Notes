@@ -7,17 +7,20 @@ import { strokeToFreedrawElement } from '../../lib/freehandElement';
 import { strokeToPath2D, STROKE_OPTIONS } from '../../lib/freehand';
 
 // Dimensions are in scene units (same coordinate space Excalidraw elements
-// live in, i.e. CSS px at zoom 1) — real paper proportions at 72dpi. These
-// define an actual finite sheet, not just a visual aspect ratio: the page is
-// rendered as a sized/positioned rect synced to Excalidraw's own scroll/zoom
-// (see syncPage below), so it has real edges instead of tiling infinitely.
+// live in, i.e. CSS px at zoom 1). A CSS px is defined as 1/96in, so these
+// are real paper sizes converted at 96dpi (e.g. A5 = 148 x 210mm) — not
+// points (1/72in), which is what these were before and rendered the page at
+// 72/96 = 75% of true size (visibly closer to A6 than A5). This define an
+// actual finite sheet, not just a visual aspect ratio: the page is rendered
+// as a sized/positioned rect synced to Excalidraw's own scroll/zoom (see
+// syncPage below), so it has real edges instead of tiling infinitely.
 const PAGE_SIZES = {
-  A5: { width: 420, height: 595, label: 'A5' },
-  A4: { width: 595, height: 842, label: 'A4' },
-  Letter: { width: 612, height: 792, label: 'Letter' },
+  A5: { width: 559, height: 794, label: 'A5' },
+  A4: { width: 794, height: 1123, label: 'A4' },
+  Letter: { width: 816, height: 1056, label: 'Letter' },
 };
 
-const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined' };
+const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined', penSize: 2.5, penColor: '#1f2937' };
 
 const CELL_SIZE = 28; // base spacing (scene px, at zoom 1) for both lined and squared patterns
 
@@ -27,11 +30,16 @@ const CELL_SIZE = 28; // base spacing (scene px, at zoom 1) for both lined and s
 // thicker the instant it's committed to the scene.
 const EXCALIDRAW_FREEDRAW_SIZE_FACTOR = 4.25;
 
+// Double-tap-to-fit thresholds (screen px / ms) for a lone finger.
+const TAP_MOVE_TOLERANCE = 10; // max movement for a touch to still count as a "tap" rather than a drag
+const DOUBLE_TAP_MS = 350; // max gap between the two taps
+const DOUBLE_TAP_DIST = 40; // max distance between the two taps' positions
+
 const PEN_SIZES = [
-  { size: 2, dot: 6 },
-  { size: 4, dot: 9 },
-  { size: 7, dot: 13 },
-  { size: 12, dot: 18 },
+  { size: 1, dot: 5 },
+  { size: 2.5, dot: 8 },
+  { size: 5, dot: 12 },
+  { size: 9, dot: 16 },
 ];
 
 const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
@@ -61,7 +69,7 @@ function patternSize(pageStyle, cellPx) {
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const { t } = useTranslation();
-  const [settings, setSettings] = useState(page.canvas_settings || DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ...(page.canvas_settings || {}) });
   const [showSettings, setShowSettings] = useState(false);
   const [showPenOptions, setShowPenOptions] = useState(false);
   // Mirrors Excalidraw's own active tool. Our reliable pressure-capture path
@@ -70,15 +78,18 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // passes straight through to Excalidraw's native handling untouched. This
   // is what makes the eraser (and select/move) work correctly with a stylus.
   const [activeToolType, setActiveToolType] = useState('freedraw');
-  const [penSize, setPenSize] = useState(4);
-  const [penColor, setPenColor] = useState(PEN_COLORS[0]);
+  // Pen size/color persist per-page (in canvas_settings, alongside page size
+  // and style) so reopening a page picks up the last pen you used on it.
+  const [penSize, setPenSizeState] = useState(settings.penSize);
+  const [penColor, setPenColorState] = useState(settings.penColor);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const pageRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
-  const touchPan = useRef(null); // { pointerId, startClientX, startClientY, startScrollX, startScrollY, zoom }
+  const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
   const activeTouchIds = useRef(new Set());
+  const lastTap = useRef(null); // { time, x, y } — for double-tap-to-fit detection
   const saveTimer = useRef(null);
 
   // Renders the page as an actual finite sheet — sized and positioned in
@@ -177,6 +188,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     }
   }
 
+  function setPenSize(size) {
+    setPenSizeState(size);
+    updateSettings({ penSize: size });
+  }
+
+  function setPenColor(color) {
+    setPenColorState(color);
+    updateSettings({ penColor: color });
+  }
+
   function resizeOverlay() {
     const canvas = overlayCanvasRef.current;
     const container = containerRef.current;
@@ -223,15 +244,18 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   const isPenActive = activeToolType === 'freedraw';
 
-  // Capture phase on the page container. Two things get intercepted here,
-  // both only while Excalidraw's own active tool is "freedraw":
+  // Capture phase on the page container, all only while Excalidraw's own
+  // active tool is "freedraw":
   //  - real pen input, which we turn into a properly pressure-captured
   //    freedraw element (see finalizeStroke).
-  //  - a *lone* finger, which we turn into a pan instead of letting it draw
-  //    (Excalidraw's own default is to draw with any single pointer,
-  //    finger included, when a draw tool is active — not what a notebook
-  //    app wants: only the pen should ever leave ink; a finger should
-  //    always navigate the page).
+  //  - a *lone* finger, which does nothing at all — Excalidraw's own
+  //    default is to draw with any single pointer, finger included, when a
+  //    draw tool is active, and to pan with it when a non-draw tool is
+  //    active. Neither is what a notebook app wants: only the pen should
+  //    ever leave ink, and a single finger resting on the page (e.g. the
+  //    heel of your hand while writing) shouldn't nudge the view either.
+  //    Moving the page is a deliberate two-finger gesture, or a double-tap
+  //    to fit it to the screen (see handleTapForDoubleTap/fitPageToScreen).
   // The moment a second finger joins, we back off entirely (no
   // stopPropagation for either pointer) and let Excalidraw's native
   // 2-finger pinch-zoom/pan take over untouched. Everything else — mouse,
@@ -249,12 +273,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     if (e.pointerType === 'touch' && isPenActive) {
       activeTouchIds.current.add(e.pointerId);
       if (activeTouchIds.current.size > 1) {
-        touchPan.current = null;
+        touchTrack.current = null;
         return;
       }
-      const api = excalidrawAPIRef.current;
-      const appState = api?.getAppState();
-      if (!appState) return;
       // Deliberately NOT stopping propagation here: Excalidraw needs to see
       // every touch's pointerdown to register it for a potential pinch a
       // moment later. If we swallowed it here (like we do for pen), a real
@@ -263,14 +284,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       // finger, and it can't compute a pinch from one registered pointer.
       // We only start actually intercepting from the first *move* onward,
       // once we know this is (still) just the one finger.
-      touchPan.current = {
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startScrollX: appState.scrollX,
-        startScrollY: appState.scrollY,
-        zoom: appState.zoom.value,
-      };
+      touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY };
     }
   }
 
@@ -282,16 +296,12 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       redrawOverlay();
       return;
     }
-    const pan = touchPan.current;
-    if (pan && e.pointerId === pan.pointerId && activeTouchIds.current.size === 1) {
+    const track = touchTrack.current;
+    if (track && e.pointerId === track.pointerId && activeTouchIds.current.size === 1) {
+      // A lone finger does nothing — just absorb the input so Excalidraw's
+      // own freedraw tool doesn't draw with it.
       e.stopPropagation();
       e.preventDefault();
-      const api = excalidrawAPIRef.current;
-      if (!api) return;
-      const scrollX = pan.startScrollX + (e.clientX - pan.startClientX) / pan.zoom;
-      const scrollY = pan.startScrollY + (e.clientY - pan.startClientY) / pan.zoom;
-      api.updateScene({ appState: { scrollX, scrollY } });
-      syncPage(scrollX, scrollY, pan.zoom);
     }
   }
 
@@ -304,8 +314,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     }
     if (e.pointerType === 'touch') {
       activeTouchIds.current.delete(e.pointerId);
-      if (touchPan.current?.pointerId === e.pointerId) {
-        touchPan.current = null;
+      const track = touchTrack.current;
+      if (track?.pointerId === e.pointerId) {
+        touchTrack.current = null;
         // We let this touch's pointerdown through (see handlePointerDownCapture)
         // so Excalidraw could register it in case a pinch followed, then
         // intercepted its moves ourselves once it turned out to be staying
@@ -316,8 +327,41 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         e.stopPropagation();
         e.preventDefault();
         cleanupStrayFreedraw();
+        handleTapForDoubleTap(e, track);
       }
     }
+  }
+
+  // A lone finger doesn't drag the page, but a quick double-tap (two taps,
+  // close together in time and position, without much movement in between)
+  // fits the page to the screen — same gesture most notebook/PDF apps use.
+  function handleTapForDoubleTap(e, track) {
+    const moved = Math.hypot(e.clientX - track.startClientX, e.clientY - track.startClientY);
+    if (moved > TAP_MOVE_TOLERANCE) {
+      lastTap.current = null;
+      return;
+    }
+    const now = Date.now();
+    const last = lastTap.current;
+    if (last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST) {
+      lastTap.current = null;
+      fitPageToScreen();
+    } else {
+      lastTap.current = { time: now, x: e.clientX, y: e.clientY };
+    }
+  }
+
+  function fitPageToScreen() {
+    const api = excalidrawAPIRef.current;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!api || !rect || !rect.width || !rect.height) return;
+    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
+    const margin = 48;
+    const zoomValue = Math.min((rect.width - margin) / dims.width, (rect.height - margin) / dims.height, 2);
+    const scrollX = rect.width / (2 * zoomValue) - dims.width / 2;
+    const scrollY = rect.height / (2 * zoomValue) - dims.height / 2;
+    api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
+    syncPage(scrollX, scrollY, zoomValue);
   }
 
   function cleanupStrayFreedraw() {
