@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw';
+import { createPortal } from 'react-dom';
+import { Excalidraw, viewportCoordsToSceneCoords, newElementWith } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { useTranslation } from 'react-i18next';
 import { isLegacyInkFormat, convertLegacyInk } from '../../lib/inkMigration';
@@ -43,6 +44,26 @@ const PEN_SIZES = [
 ];
 
 const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
+
+// Icons for the custom selection tool button portaled into Excalidraw's own
+// toolbar (see renderSelectionToolButton) — a dashed rectangle/blob to read
+// as "marquee"/"lasso" at a glance, matching the outline style Excalidraw's
+// own tool icons use (currentColor stroke, no fill).
+const RectSelectIcon = (
+  <svg viewBox="0 0 20 20" width={20} height={20} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3.5" y="5" width="13" height="10" rx="1" strokeDasharray="2.5 2.5" />
+  </svg>
+);
+const FreeformSelectIcon = (
+  <svg viewBox="0 0 20 20" width={20} height={20} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4.5 9.7c-.4-3.1 2.6-5.3 5.4-4.9 3.1.5 5.7 2.1 5.4 5.2-.3 2.9-3.1 4.7-5.9 4.6-2.3-.1-4.6-1.9-4.9-4.9z" strokeDasharray="2.5 2.5" />
+  </svg>
+);
+const ChevronDownIcon = (
+  <svg viewBox="0 0 10 6" width={10} height={6} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M1 1l4 4 4-4" />
+  </svg>
+);
 
 // Draws the ruled/squared pattern directly with the Canvas 2D API instead
 // of a CSS repeating-gradient background-image scaled via background-size
@@ -229,6 +250,17 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // selects whole elements only — literally cut any freedraw stroke that's
   // only partially inside it (see finalizeSelection).
   const [selectionTool, setSelectionTool] = useState(null);
+  // Which sub-tool the combined selection button shows/activates: remembers
+  // the last one picked from its flyout, same as MS Paint's own selection
+  // button remembering rectangle vs. free-form between uses.
+  const [selectionVariant, setSelectionVariant] = useState('rect');
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  // The DOM node of Excalidraw's own native toolbar island (".App-toolbar"),
+  // found post-mount so our selection button can be portaled to render as a
+  // literal child of it — appearing as part of Excalidraw's real toolbar
+  // pill instead of a separate custom bar (see the effect below and
+  // renderSelectionToolButton).
+  const [toolbarPortalEl, setToolbarPortalEl] = useState(null);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const resizeObserverRef = useRef(null);
@@ -348,11 +380,100 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     });
   }
 
+  // Picking a variant from the selection tool's flyout always activates it
+  // (never toggles it off) — picking "Rectangle"/"Free-form" from a menu
+  // reads as choosing a tool, not toggling one, and also remembers the
+  // choice as the default the main button shows/activates next time.
+  function chooseSelectionVariant(mode) {
+    setSelectionVariant(mode);
+    setSelectionMenuOpen(false);
+    setSelectionTool(mode);
+    excalidrawAPIRef.current?.setActiveTool({ type: 'selection' });
+  }
+
+  // Closes the flyout on any interaction outside it — it floats directly
+  // over the canvas/toolbar, so leaving it open until the caret is clicked
+  // again would be an easy way to accidentally block the page underneath.
+  useEffect(() => {
+    if (!selectionMenuOpen) return;
+    const handleOutside = (e) => {
+      if (!e.target.closest?.('.quarc-selection-tool')) setSelectionMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', handleOutside, true);
+    return () => document.removeEventListener('pointerdown', handleOutside, true);
+  }, [selectionMenuOpen]);
+
   function handleExcalidrawAPI(api) {
     excalidrawAPIRef.current = api;
     const appState = api.getAppState();
     syncPage(appState.scrollX, appState.scrollY, appState.zoom.value);
   }
+
+  // Opens every page fit-to-screen rather than at the fixed zoom=1 the
+  // declarative initialData above uses as a placeholder (initialData can't
+  // compute a real fit zoom itself — the container's size isn't known until
+  // after mount). A plain post-mount call from within handleExcalidrawAPI
+  // itself doesn't stick (confirmed earlier: Excalidraw's own post-mount
+  // setup silently reverts an appState update made from inside that ref
+  // callback's call stack) — deferring it to a rAF queued from a [page.id]
+  // effect runs it in a genuinely later task, after that setup has finished,
+  // the same way the working double-tap-to-fit handler already does.
+  useEffect(() => {
+    let cancelled = false;
+    let raf;
+    const start = performance.now();
+    // A single deferred call isn't enough: measured empirically, a call
+    // made ~1 frame after mount gets silently reverted a few frames later
+    // (Excalidraw appears to apply its own initialData-driven restore
+    // asynchronously post-mount, not just during the synchronous mount
+    // callback the earlier double-tap-to-fit finding was about) — a plain
+    // one-shot deferred call raced that and lost. Re-asserting fit-to-screen
+    // on every frame for a short window guarantees ours is the last write
+    // regardless of exactly when that internal restore resolves, without
+    // depending on a guessed delay.
+    const tick = () => {
+      if (cancelled) return;
+      fitPageToScreen();
+      if (performance.now() - start < 800) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page.id]);
+
+  // Excalidraw's toolbar island (".App-toolbar") isn't itself the flex row
+  // the tool icons sit in — that's its child ".Stack_horizontal" (confirmed
+  // by inspecting the actual rendered DOM: Island > HintViewer + a hidden
+  // heading + one "Stack Stack_horizontal" div holding lock/hand/selection/
+  // rectangle/.../eraser/extra-tools in a row). Targeting the Island itself
+  // portaled our button onto its own line below the icons instead of beside
+  // them, since Island doesn't apply flex — this is a real, persistent DOM
+  // node for as long as the page is mounted, not something the public API
+  // exposes a child-slot for, so it's located directly and our own button is
+  // portaled into it (see renderSelectionToolButton). Polls across animation
+  // frames instead of assuming it exists on the first one, since it's
+  // rendered by Excalidraw's own mount, not ours. Re-runs on page navigation
+  // because Excalidraw remounts (key={page.id} below) and the old node goes
+  // away.
+  useEffect(() => {
+    setToolbarPortalEl(null);
+    let cancelled = false;
+    let raf;
+    const poll = () => {
+      if (cancelled) return;
+      const el = containerRef.current?.querySelector('.App-toolbar > .Stack_horizontal');
+      if (el) setToolbarPortalEl(el);
+      else raf = requestAnimationFrame(poll);
+    };
+    raf = requestAnimationFrame(poll);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [page.id]);
 
   function updateSettings(patch) {
     const next = { ...settings, ...patch };
@@ -907,7 +1028,28 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       }
     }
 
-    api.updateScene({ elements: newElements, appState: { selectedElementIds, selectedGroupIds: {} } });
+    // Excalidraw draws a per-element highlight box for every selected
+    // element, UNLESS that element belongs to a currently-selected *group*
+    // (confirmed by reading its own interactive-canvas renderer: it skips an
+    // element's individual highlight when isSelectedViaGroup() is true, and
+    // draws exactly one dashed box for the group instead via
+    // getCommonBounds). So when a cut leaves more than one piece selected,
+    // sharing a fresh groupId across them — the same mechanism Excalidraw's
+    // own Ctrl+G uses — collapses "every separate stroke as its own window"
+    // down to the single box the user asked for, entirely through
+    // Excalidraw's native rendering (no custom overlay needed).
+    let finalElements = newElements;
+    const selectedIds = Object.keys(selectedElementIds);
+    const appStatePatch = { selectedElementIds, selectedGroupIds: {} };
+    if (selectedIds.length > 1) {
+      const groupId = crypto.randomUUID();
+      finalElements = newElements.map((el) =>
+        selectedElementIds[el.id] ? newElementWith(el, { groupIds: [...el.groupIds, groupId] }) : el
+      );
+      appStatePatch.selectedGroupIds = { [groupId]: true };
+    }
+
+    api.updateScene({ elements: finalElements, appState: appStatePatch });
     scheduleSave();
 
     // Immediately hand off to Excalidraw's own plain "selection" tool
@@ -951,6 +1093,68 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
     api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), element] });
     scheduleSave();
+  }
+
+  // Renders the MS-Paint-style selection tool as a literal child of
+  // Excalidraw's own toolbar island (toolbarPortalEl, ".App-toolbar") via a
+  // portal, instead of as a separate custom bar — it reuses Excalidraw's own
+  // ToolIcon/dropdown-menu CSS classes (global, scoped only by an ancestor
+  // ".excalidraw" class, not CSS-modules-hashed) so it inherits the exact
+  // same look, spacing and hover/checked states as every native tool button
+  // beside it. The main icon toggles the last-picked variant on/off; the
+  // small caret opens a flyout to switch between Rectangle and Free-form,
+  // matching the reference screenshot.
+  function renderSelectionToolButton() {
+    if (!toolbarPortalEl) return null;
+    const icon = selectionVariant === 'freeform' ? FreeformSelectIcon : RectSelectIcon;
+    return createPortal(
+      <div className="quarc-selection-tool" style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+        <label className="ToolIcon" title={t('canvas.selectionTool')}>
+          <input
+            type="radio"
+            className="ToolIcon_type_radio ToolIcon_size_medium"
+            checked={selectionTool === selectionVariant}
+            onChange={() => selectTool(selectionVariant)}
+          />
+          <div className="ToolIcon__icon">{icon}</div>
+        </label>
+        <button
+          type="button"
+          className="quarc-selection-tool__caret"
+          title={t('canvas.selectionToolVariant')}
+          onClick={() => setSelectionMenuOpen((v) => !v)}
+        >
+          {ChevronDownIcon}
+        </button>
+        {selectionMenuOpen && (
+          <div className="dropdown-menu quarc-selection-tool__menu">
+            <div className="dropdown-menu-container Island" style={{ '--padding': 2 }}>
+              <button
+                type="button"
+                className={`dropdown-menu-item dropdown-menu-item-base${selectionVariant === 'rect' ? ' dropdown-menu-item--selected' : ''}`}
+                onClick={() => chooseSelectionVariant('rect')}
+              >
+                <div className="dropdown-menu-item__text">
+                  {RectSelectIcon}
+                  {t('canvas.rectSelect')}
+                </div>
+              </button>
+              <button
+                type="button"
+                className={`dropdown-menu-item dropdown-menu-item-base${selectionVariant === 'freeform' ? ' dropdown-menu-item--selected' : ''}`}
+                onClick={() => chooseSelectionVariant('freeform')}
+              >
+                <div className="dropdown-menu-item__text">
+                  {FreeformSelectIcon}
+                  {t('canvas.freeSelect')}
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>,
+      toolbarPortalEl
+    );
   }
 
   return (
@@ -1003,26 +1207,6 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
             )}
           </div>
         )}
-        <button
-          className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium shadow-sm ring-1 transition ${
-            selectionTool === 'rect'
-              ? 'bg-accent text-white ring-accent'
-              : 'bg-white text-neutral-700 ring-neutral-200 hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700'
-          }`}
-          onClick={() => selectTool('rect')}
-        >
-          ▭ {t('canvas.rectSelect')}
-        </button>
-        <button
-          className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium shadow-sm ring-1 transition ${
-            selectionTool === 'freeform'
-              ? 'bg-accent text-white ring-accent'
-              : 'bg-white text-neutral-700 ring-neutral-200 hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700'
-          }`}
-          onClick={() => selectTool('freeform')}
-        >
-          ✂️ {t('canvas.freeSelect')}
-        </button>
         <div className="relative">
           <button
             className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
@@ -1076,6 +1260,11 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         <style>{`
           .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
           .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
+          .quarc-canvas-page .quarc-selection-tool { margin-left: 2px; }
+          .quarc-canvas-page .quarc-selection-tool__caret { width: 14px; align-self: stretch; display: flex; align-items: center; justify-content: center; border: 0; background: transparent; cursor: pointer; color: var(--color-on-surface); border-radius: var(--border-radius-md); }
+          .quarc-canvas-page .quarc-selection-tool__caret:hover { background-color: var(--button-hover-bg); }
+          .quarc-canvas-page .quarc-selection-tool__menu { left: 0; z-index: 2; min-width: 9.5rem; }
+          .quarc-canvas-page .quarc-selection-tool__menu .dropdown-menu-container { display: flex; flex-direction: column; gap: 2px; padding: 4px; }
         `}</style>
         <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl" />
         <canvas ref={patternCanvasRef} className="pointer-events-none absolute inset-0" />
@@ -1088,6 +1277,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           theme="light"
         />
         <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0" />
+        {renderSelectionToolButton()}
       </div>
     </div>
   );

@@ -32,6 +32,8 @@
     "penOptions": "Kalem",
     "penSize": "Boyut",
     "penColor": "Renk",
+    "selectionTool": "Seçim aracı",
+    "selectionToolVariant": "Seçim şeklini seç",
     "rectSelect": "Dikdörtgen seçim",
     "freeSelect": "Serbest seçim",
     "pageSettings": "Sayfa ayarları",

@@ -32,6 +32,8 @@
     "penOptions": "Pen",
     "penSize": "Size",
     "penColor": "Color",
+    "selectionTool": "Selection tool",
+    "selectionToolVariant": "Choose selection shape",
     "rectSelect": "Rect select",
     "freeSelect": "Free select",
     "pageSettings": "Page settings",
