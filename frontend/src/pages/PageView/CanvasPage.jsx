@@ -138,17 +138,26 @@ function segmentIntersection(p1, p2, p3, p4) {
   return { t, x: p1.x + t * d1x, y: p1.y + t * d1y };
 }
 
-// Literally cuts a polyline (a freedraw stroke's points, in scene
-// coordinates, with pressure) at every point it crosses the selection
-// polygon's boundary — like Microsoft Paint's selection tool cutting
-// through whatever pixels it encloses, rather than treating each stroke as
-// an atomic all-or-nothing object. Walks the points, and at each
-// inside/outside transition finds every polygon-edge crossing along that
-// segment (sorted by how far along it they fall, so a segment that weaves
+// Literally cuts a polyline (a freedraw stroke's points, or another
+// element's outline — see getCuttableOutline — in scene coordinates, with
+// pressure) at every point it crosses the selection polygon's boundary —
+// like Microsoft Paint's selection tool cutting through whatever pixels it
+// encloses, rather than treating each stroke as an atomic all-or-nothing
+// object. Walks every segment and finds every polygon-edge crossing along
+// it (sorted by how far along it they fall, so a segment that weaves
 // through a concave lasso boundary more than once is still handled
 // correctly), splitting the stroke there with a linearly-interpolated
 // pressure. Returns the resulting inside/outside pieces as arrays of point
 // runs — each run becomes its own new freedraw element.
+//
+// Crossings are checked on EVERY segment, not only when its two endpoints
+// are already on different sides: a freedraw stroke's densely-sampled
+// points made that shortcut invisible, but a long, sparse segment — a
+// rectangle's edge, a straight two-point line — can dip into the selection
+// and back out again entirely between two same-side endpoints, and those
+// crossings would otherwise be silently skipped (confirmed: this is exactly
+// what made lines/rectangles fall through to "select whole" instead of
+// being cut).
 function clipPolylineByPolygon(points, polygon) {
   const insideRuns = [];
   const outsideRuns = [];
@@ -164,12 +173,6 @@ function clipPolylineByPolygon(points, polygon) {
   for (let i = 1; i < points.length; i++) {
     const p1 = points[i - 1];
     const p2 = points[i];
-    const p2Inside = pointInPolygon(p2.x, p2.y, polygon);
-
-    if (p2Inside === currentInside) {
-      currentRun.push(p2);
-      continue;
-    }
 
     const crossings = [];
     for (let j = 0; j < polygon.length; j++) {
@@ -192,17 +195,17 @@ function clipPolylineByPolygon(points, polygon) {
     // Trust a fresh test on p2 over the crossing-count parity, so a rare
     // numerical edge case in the crossing search can't compound across the
     // rest of the stroke.
-    currentInside = p2Inside;
+    currentInside = pointInPolygon(p2.x, p2.y, polygon);
   }
   flush();
 
   return { insideRuns, outsideRuns };
 }
 
-// For non-freedraw elements (shapes, text, ...) that don't make sense to
-// literally cut, this decides whether the selection area touches the
-// element's bounding box at all — checked three ways: either shape's
-// corners inside the other shape, or any of their edges crossing.
+// For elements with no cuttable outline (text, images, frames, ...), this
+// decides whether the selection area touches the element's bounding box at
+// all — checked three ways: either shape's corners inside the other shape,
+// or any of their edges crossing.
 function boundingBoxIntersectsPolygon(el, polygon) {
   const minX = el.x;
   const minY = el.y;
@@ -224,6 +227,71 @@ function boundingBoxIntersectsPolygon(el, polygon) {
     }
   }
   return false;
+}
+
+// Rotates a point around a center by an angle in radians (Excalidraw stores
+// element rotation this way — corners/outline samples below are computed
+// axis-aligned first, then rotated to match the element's actual angle).
+function rotatePoint(p, cx, cy, angle) {
+  if (!angle) return { x: p.x, y: p.y };
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const dx = p.x - cx;
+  const dy = p.y - cy;
+  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+}
+
+// Returns an element's outline as an absolute-coordinate point list — the
+// same shape clipPolylineByPolygon already expects for freedraw strokes —
+// so a rectangle/diamond/ellipse/line/arrow can be cut exactly like a pen
+// stroke instead of only ever being selected whole. freedraw/line/arrow are
+// already point sequences (open paths); rectangle/diamond/ellipse aren't
+// stored as points at all, so their corners (or, for the ellipse, a sampled
+// perimeter) are computed here and the loop is explicitly closed by
+// repeating the first point at the end, so a selection that clips through a
+// closed shape's edge still produces correct inside/outside arcs. Returns
+// null for element types that can't be meaningfully split into "inside"/
+// "outside" pieces (text, image, frame, ...) — those fall back to being
+// selected whole via boundingBoxIntersectsPolygon.
+function getCuttableOutline(el) {
+  if (el.type === 'freedraw') {
+    return el.points.map((p, i) => ({ x: el.x + p[0], y: el.y + p[1], pressure: el.pressures?.[i] ?? 0.5 }));
+  }
+  if (el.type === 'line' || el.type === 'arrow') {
+    return el.points.map((p) => ({ x: el.x + p[0], y: el.y + p[1], pressure: 0.5 }));
+  }
+  const cx = el.x + el.width / 2;
+  const cy = el.y + el.height / 2;
+  if (el.type === 'rectangle' || el.type === 'diamond') {
+    const corners =
+      el.type === 'diamond'
+        ? [
+            { x: cx, y: el.y },
+            { x: el.x + el.width, y: cy },
+            { x: cx, y: el.y + el.height },
+            { x: el.x, y: cy },
+          ]
+        : [
+            { x: el.x, y: el.y },
+            { x: el.x + el.width, y: el.y },
+            { x: el.x + el.width, y: el.y + el.height },
+            { x: el.x, y: el.y + el.height },
+          ];
+    return [...corners, corners[0]].map((p) => ({ ...rotatePoint(p, cx, cy, el.angle), pressure: 0.5 }));
+  }
+  if (el.type === 'ellipse') {
+    const rx = el.width / 2;
+    const ry = el.height / 2;
+    const SEGMENTS = 64;
+    const points = [];
+    for (let i = 0; i <= SEGMENTS; i++) {
+      const theta = (i / SEGMENTS) * Math.PI * 2;
+      const p = { x: cx + rx * Math.cos(theta), y: cy + ry * Math.sin(theta) };
+      points.push({ ...rotatePoint(p, cx, cy, el.angle), pressure: 0.5 });
+    }
+    return points;
+  }
+  return null;
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
@@ -930,13 +998,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   }
 
   // MS-Paint-style selection: converts the drawn region (rectangle or
-  // freeform loop) to a scene-coordinate polygon, then — for every freedraw
-  // stroke only partially inside it — literally cuts the stroke at the
-  // boundary via clipPolylineByPolygon, replacing it with separate "inside"
-  // (selected) and "outside" (left behind, unselected) pieces. A stroke
-  // entirely inside or entirely outside is left as a single piece (just
-  // selected, or just untouched). Non-freedraw elements (shapes/text) can't
-  // sensibly be "cut", so those are selected whole if the region touches
+  // freeform loop) to a scene-coordinate polygon, then — for every element
+  // with a cuttable outline (freedraw, line, arrow, rectangle, diamond,
+  // ellipse — see getCuttableOutline) only partially inside it — literally
+  // cuts that outline at the boundary via clipPolylineByPolygon, replacing
+  // it with separate "inside" (selected) and "outside" (left behind,
+  // unselected) pieces. An element entirely inside or entirely outside is
+  // left as a single piece (just selected, or just untouched) — still its
+  // original type, so an untouched/fully-selected rectangle stays resizable
+  // and keeps its fill. Elements with no sensible "inside"/"outside" split
+  // (text, images, frames, ...) are selected whole if the region touches
   // their bounding box at all. Leaves Excalidraw's own "selection" tool to
   // take over from there — its usual group box/resize handles/drag-
   // together UI works on whatever ends up selected here exactly as if the
@@ -992,24 +1063,26 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         newElements.push(el);
         continue;
       }
-      if (el.type === 'freedraw') {
-        const absPoints = el.points.map((p, i) => ({
-          x: el.x + p[0],
-          y: el.y + p[1],
-          pressure: el.pressures?.[i] ?? 0.5,
-        }));
-        const { insideRuns, outsideRuns } = clipPolylineByPolygon(absPoints, polygon);
+      const outline = getCuttableOutline(el);
+      if (outline) {
+        const { insideRuns, outsideRuns } = clipPolylineByPolygon(outline, polygon);
         if (insideRuns.length === 0) {
           newElements.push(el); // untouched — none of it is in the selection
           continue;
         }
         if (outsideRuns.length === 0) {
           // Entirely inside — keep the original element (preserves its id/
-          // history) rather than rebuilding identical geometry, just select it.
+          // history, and for shapes its fill/editability) rather than
+          // rebuilding identical geometry, just select it.
           newElements.push(el);
           selectedElementIds[el.id] = true;
           continue;
         }
+        // Partially inside: rebuild both sides as freedraw strokes along the
+        // cut outline — once a rectangle/ellipse/line/arrow has had a piece
+        // cut out of it, it's no longer a whole, resizable shape (its fill
+        // can't sensibly follow a broken outline either), so — same as a cut
+        // pen stroke — it becomes ink tracing the remaining path.
         for (const run of outsideRuns) {
           if (run.length < 2) continue;
           newElements.push(
@@ -1023,6 +1096,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           selectedElementIds[piece.id] = true;
         }
       } else {
+        // Text, images, frames, ... can't be meaningfully split into
+        // "inside"/"outside" pieces — selected whole if the region touches
+        // them at all.
         newElements.push(el);
         if (boundingBoxIntersectsPolygon(el, polygon)) selectedElementIds[el.id] = true;
       }
