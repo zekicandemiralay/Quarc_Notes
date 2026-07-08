@@ -87,9 +87,7 @@ function redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, c
   ctx.restore();
 }
 
-// Standard ray-casting point-in-polygon test, used by the lasso tool to
-// decide which elements fall inside the freeform loop the user drew — an
-// element counts as "inside" if its own center point is.
+// Standard ray-casting point-in-polygon test.
 function pointInPolygon(x, y, polygon) {
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -101,6 +99,110 @@ function pointInPolygon(x, y, polygon) {
     if (intersect) inside = !inside;
   }
   return inside;
+}
+
+// Standard 2D segment-segment intersection. Returns the intersection point
+// plus how far along p1->p2 it falls (t, 0..1), or null if the segments
+// don't cross.
+function segmentIntersection(p1, p2, p3, p4) {
+  const d1x = p2.x - p1.x;
+  const d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x;
+  const d2y = p4.y - p3.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null; // parallel (or degenerate)
+  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+  const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { t, x: p1.x + t * d1x, y: p1.y + t * d1y };
+}
+
+// Literally cuts a polyline (a freedraw stroke's points, in scene
+// coordinates, with pressure) at every point it crosses the selection
+// polygon's boundary — like Microsoft Paint's selection tool cutting
+// through whatever pixels it encloses, rather than treating each stroke as
+// an atomic all-or-nothing object. Walks the points, and at each
+// inside/outside transition finds every polygon-edge crossing along that
+// segment (sorted by how far along it they fall, so a segment that weaves
+// through a concave lasso boundary more than once is still handled
+// correctly), splitting the stroke there with a linearly-interpolated
+// pressure. Returns the resulting inside/outside pieces as arrays of point
+// runs — each run becomes its own new freedraw element.
+function clipPolylineByPolygon(points, polygon) {
+  const insideRuns = [];
+  const outsideRuns = [];
+  if (points.length === 0) return { insideRuns, outsideRuns };
+
+  let currentInside = pointInPolygon(points[0].x, points[0].y, polygon);
+  let currentRun = [points[0]];
+
+  const flush = () => {
+    if (currentRun.length > 1) (currentInside ? insideRuns : outsideRuns).push(currentRun);
+  };
+
+  for (let i = 1; i < points.length; i++) {
+    const p1 = points[i - 1];
+    const p2 = points[i];
+    const p2Inside = pointInPolygon(p2.x, p2.y, polygon);
+
+    if (p2Inside === currentInside) {
+      currentRun.push(p2);
+      continue;
+    }
+
+    const crossings = [];
+    for (let j = 0; j < polygon.length; j++) {
+      const a = polygon[j];
+      const b = polygon[(j + 1) % polygon.length];
+      const hit = segmentIntersection(p1, p2, a, b);
+      if (hit) crossings.push(hit);
+    }
+    crossings.sort((a, b) => a.t - b.t);
+
+    for (const c of crossings) {
+      const pressure = p1.pressure + (p2.pressure - p1.pressure) * c.t;
+      const boundaryPoint = { x: c.x, y: c.y, pressure };
+      currentRun.push(boundaryPoint);
+      flush();
+      currentInside = !currentInside;
+      currentRun = [boundaryPoint];
+    }
+    currentRun.push(p2);
+    // Trust a fresh test on p2 over the crossing-count parity, so a rare
+    // numerical edge case in the crossing search can't compound across the
+    // rest of the stroke.
+    currentInside = p2Inside;
+  }
+  flush();
+
+  return { insideRuns, outsideRuns };
+}
+
+// For non-freedraw elements (shapes, text, ...) that don't make sense to
+// literally cut, this decides whether the selection area touches the
+// element's bounding box at all — checked three ways: either shape's
+// corners inside the other shape, or any of their edges crossing.
+function boundingBoxIntersectsPolygon(el, polygon) {
+  const minX = el.x;
+  const minY = el.y;
+  const maxX = el.x + el.width;
+  const maxY = el.y + el.height;
+  const corners = [
+    { x: minX, y: minY },
+    { x: maxX, y: minY },
+    { x: maxX, y: maxY },
+    { x: minX, y: maxY },
+  ];
+  if (corners.some((c) => pointInPolygon(c.x, c.y, polygon))) return true;
+  if (polygon.some((p) => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY)) return true;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    for (let j = 0; j < polygon.length; j++) {
+      if (segmentIntersection(a, b, polygon[j], polygon[(j + 1) % polygon.length])) return true;
+    }
+  }
+  return false;
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
@@ -118,13 +220,15 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   // and style) so reopening a page picks up the last pen you used on it.
   const [penSize, setPenSizeState] = useState(settings.penSize);
   const [penColor, setPenColorState] = useState(settings.penColor);
-  // Custom freeform selection tool — Excalidraw only ships rectangular
-  // marquee selection natively. While active, Excalidraw's own tool is
-  // forced to "selection" (so the group box/resize handles it draws for
-  // whatever we select work normally), and we capture the drag ourselves
-  // to draw the loop and compute the selection instead of letting
-  // Excalidraw's own marquee-select run.
-  const [lassoMode, setLassoMode] = useState(false);
+  // Custom MS-Paint-style selection: 'rect' (dashed marquee) or 'freeform'
+  // (dashed lasso loop), or null when neither is active. While one is
+  // active, Excalidraw's own tool is forced to "selection" (so the group
+  // box/resize handles/drag-together UI it draws for whatever ends up
+  // selected work normally), and we capture the drag ourselves to draw the
+  // selection region and — unlike Excalidraw's native marquee, which
+  // selects whole elements only — literally cut any freedraw stroke that's
+  // only partially inside it (see finalizeSelection).
+  const [selectionTool, setSelectionTool] = useState(null);
   const excalidrawAPIRef = useRef(null);
   const containerRef = useRef(null);
   const resizeObserverRef = useRef(null);
@@ -132,7 +236,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const pageRef = useRef(null);
   const patternCanvasRef = useRef(null);
   const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
-  const lassoDrawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY}] }
+  const selectionDrawing = useRef(null); // { pointerId, mode: 'rect'|'freeform', points: [{x,y,clientX,clientY}] }
   const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
   const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
   const pinchTrack = useRef(null); // { startDist, startMidX, startMidY, startZoom, startScrollX, startScrollY }
@@ -229,16 +333,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   }
 
   // Picking any tool other than selection (pen, eraser, a shape, ...) means
-  // the user is done lassoing — leaving lassoMode on while e.g. freedraw is
-  // active would be confusing, since freedraw's own pen capture already
-  // takes priority.
+  // the user is done with the custom selection tool — leaving it on while
+  // e.g. freedraw is active would be confusing, since freedraw's own pen
+  // capture already takes priority.
   useEffect(() => {
-    if (activeToolType !== 'selection') setLassoMode(false);
+    if (activeToolType !== 'selection') setSelectionTool(null);
   }, [activeToolType]);
 
-  function toggleLasso() {
-    setLassoMode((prev) => {
-      const next = !prev;
+  function selectTool(mode) {
+    setSelectionTool((prev) => {
+      const next = prev === mode ? null : mode;
       if (next) excalidrawAPIRef.current?.setActiveTool({ type: 'selection' });
       return next;
     });
@@ -321,17 +425,26 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       ctx.fill(path);
       return;
     }
-    if (lassoDrawing.current && lassoDrawing.current.points.length >= 2) {
-      const pts = lassoDrawing.current.points;
+    if (selectionDrawing.current && selectionDrawing.current.points.length >= 2) {
+      const sel = selectionDrawing.current;
+      const pts = sel.points;
       ctx.save();
       ctx.setLineDash([6, 4]);
       ctx.strokeStyle = '#6965db';
       ctx.fillStyle = 'rgba(105, 101, 219, 0.08)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      ctx.closePath();
+      if (sel.mode === 'rect') {
+        const p0 = pts[0];
+        const p1 = pts[pts.length - 1];
+        const x = Math.min(p0.x, p1.x);
+        const y = Math.min(p0.y, p1.y);
+        ctx.rect(x, y, Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y));
+      } else {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+      }
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -429,31 +542,29 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     };
   }
 
-  // Capture phase on the page container, all only while Excalidraw's own
-  // active tool is "freedraw":
-  //  - real pen input, which we turn into a properly pressure-captured
-  //    freedraw element (see finalizeStroke).
-  //  - touch input, which we handle entirely ourselves rather than letting
-  //    Excalidraw's own touch handling run at all: a *lone* finger does
-  //    nothing (Excalidraw's own default is to draw with any single
-  //    pointer, finger included, when a draw tool is active — not what a
-  //    notebook app wants: only the pen should ever leave ink, and a single
-  //    finger resting on the page, e.g. the heel of your hand while
-  //    writing, shouldn't nudge the view either); two fingers pinch-zoom
-  //    and pan together (see updatePinch), with a hard floor at "page fit
-  //    to screen" — you can zoom in as far as you like, but never out past
-  //    seeing the whole page. A double-tap also fits the page to the
-  //    screen (see handleTapForDoubleTap/fitPageToScreen).
-  // Everything else — mouse, and pen/touch while any OTHER tool
-  // (select/eraser/shapes) is active — is never touched here, so it falls
-  // through to Excalidraw natively; that's what gives us a working eraser
-  // and select/move for free.
+  // Capture phase on the page container:
+  //  - real pen input while freedraw is active, which we turn into a
+  //    properly pressure-captured freedraw element (see finalizeStroke) —
+  //    pen input while any OTHER tool is active falls through to Excalidraw
+  //    natively, which is what gives us a working eraser/select for free.
+  //  - camera control (two-finger pinch-zoom/pan, with a hard floor at
+  //    "page fit to screen", and double-tap-to-fit) works the same
+  //    regardless of which tool is active, since navigating the page isn't
+  //    a tool-specific gesture — see updatePinch/handleTapForDoubleTap.
+  //  - a *lone* finger only gets consumed while freedraw is active (a
+  //    notebook app shouldn't draw or pan with a bare finger — only the pen
+  //    should leave ink, and a finger resting on the page, e.g. the heel of
+  //    your hand while writing, shouldn't nudge the view either). With any
+  //    other tool, a lone finger is left alone so touch keeps working
+  //    normally for that tool (eraser, select, ...) — except when it looks
+  //    like the second tap of a double-tap, which we pre-empt so
+  //    Excalidraw's own native double-tap/dblclick zoom doesn't also fire.
   function handlePointerDownCapture(e) {
-    if (lassoMode) {
-      if (lassoDrawing.current) return; // already lassoing with another pointer — ignore
+    if (selectionTool) {
+      if (selectionDrawing.current) return; // already selecting with another pointer — ignore
       e.stopPropagation();
       e.preventDefault();
-      lassoDrawing.current = { pointerId: e.pointerId, points: [getPoint(e)] };
+      selectionDrawing.current = { pointerId: e.pointerId, mode: selectionTool, points: [getPoint(e)] };
       return;
     }
     if (e.pointerType === 'pen') {
@@ -463,16 +574,49 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: penColor, size: penSize };
       return;
     }
-    if (e.pointerType === 'touch' && isPenActive) {
-      e.stopPropagation();
-      e.preventDefault();
+    if (e.pointerType === 'touch') {
       touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (touchPoints.current.size === 1) {
-        touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY };
-        pinchTrack.current = null;
-      } else if (touchPoints.current.size === 2) {
+
+      if (touchPoints.current.size >= 2) {
+        // A second finger always hijacks into our own pinch/pan, no matter
+        // which tool is active — camera control isn't a tool-specific
+        // gesture. (If the first finger's own down wasn't consumed below
+        // because some other tool was active, Excalidraw may have already
+        // started its own single-finger action with it; taking over from
+        // here is an accepted rough edge for a second finger landing
+        // mid-gesture, which is rare in practice.)
         touchTrack.current = null;
+        e.stopPropagation();
+        e.preventDefault();
         startPinch();
+        return;
+      }
+
+      if (isPenActive) {
+        // A lone finger never draws or pans while writing — consume it
+        // entirely (see the block comment above).
+        e.stopPropagation();
+        e.preventDefault();
+        touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: true };
+        pinchTrack.current = null;
+        return;
+      }
+
+      // Any other tool: only pre-empt this touch if it looks like the
+      // second tap of a double-tap (close in time and position to the last
+      // recorded tap) — that stops Excalidraw's own native double-tap/
+      // dblclick zoom from also firing. Otherwise leave it alone so touch
+      // keeps working normally for whatever tool is active (eraser,
+      // select, ...); we still track its start position so a genuine tap
+      // (not a drag) gets recorded as the "last tap" for next time.
+      const now = Date.now();
+      const last = lastTap.current;
+      const looksLikeSecondTap = !!last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST;
+      touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: looksLikeSecondTap };
+      pinchTrack.current = null;
+      if (looksLikeSecondTap) {
+        e.stopPropagation();
+        e.preventDefault();
       }
     }
   }
@@ -545,10 +689,10 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   }
 
   function handlePointerMoveCapture(e) {
-    if (lassoDrawing.current && e.pointerId === lassoDrawing.current.pointerId) {
+    if (selectionDrawing.current && e.pointerId === selectionDrawing.current.pointerId) {
       e.stopPropagation();
       e.preventDefault();
-      lassoDrawing.current.points.push(getPoint(e));
+      selectionDrawing.current.points.push(getPoint(e));
       redrawOverlay();
       return;
     }
@@ -560,29 +704,42 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       return;
     }
     if (touchPoints.current.has(e.pointerId)) {
-      e.stopPropagation();
-      e.preventDefault();
       touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      // Touch fires pointermove far faster than the display can paint (up
-      // to 120Hz+ on some tablets). Coalescing to one updatePinch() per
-      // animation frame — using whatever the latest finger positions are by
-      // the time that frame runs — keeps the gesture smooth without doing
-      // redundant work for intermediate samples that never even get drawn.
-      if (touchPoints.current.size === 2 && pinchTrack.current && !pinchRAF.current) {
-        pinchRAF.current = requestAnimationFrame(() => {
-          pinchRAF.current = null;
-          if (touchPoints.current.size === 2 && pinchTrack.current) updatePinch();
-        });
+
+      if (touchPoints.current.size >= 2 && pinchTrack.current) {
+        e.stopPropagation();
+        e.preventDefault();
+        // Touch fires pointermove far faster than the display can paint (up
+        // to 120Hz+ on some tablets). Coalescing to one updatePinch() per
+        // animation frame — using whatever the latest finger positions are
+        // by the time that frame runs — keeps the gesture smooth without
+        // doing redundant work for intermediate samples that never even get
+        // drawn.
+        if (!pinchRAF.current) {
+          pinchRAF.current = requestAnimationFrame(() => {
+            pinchRAF.current = null;
+            if (touchPoints.current.size >= 2 && pinchTrack.current) updatePinch();
+          });
+        }
+        return;
       }
-      // A lone finger (size 1) does nothing beyond absorbing the input.
+
+      // A lone finger: consume it only if we're the ones handling its
+      // whole lifecycle (writing mode, or it was flagged as a likely
+      // second tap at pointerdown) — otherwise this is normal single-finger
+      // use of whatever other tool is active, and shouldn't be touched.
+      if (touchTrack.current?.pointerId === e.pointerId && touchTrack.current.consumed) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
     }
   }
 
   function handlePointerUpCapture(e) {
-    if (lassoDrawing.current && e.pointerId === lassoDrawing.current.pointerId) {
+    if (selectionDrawing.current && e.pointerId === selectionDrawing.current.pointerId) {
       e.stopPropagation();
       e.preventDefault();
-      finalizeLasso();
+      finalizeSelection();
       return;
     }
     if (drawing.current && e.pointerId === drawing.current.pointerId) {
@@ -592,10 +749,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       return;
     }
     if (touchPoints.current.has(e.pointerId)) {
-      e.stopPropagation();
-      e.preventDefault();
+      const wasPinching = touchPoints.current.size >= 2 && !!pinchTrack.current;
+      const track = touchTrack.current?.pointerId === e.pointerId ? touchTrack.current : null;
       touchPoints.current.delete(e.pointerId);
-      const track = touchTrack.current;
       if (touchPoints.current.size < 2) {
         pinchTrack.current = null;
         if (pinchRAF.current) {
@@ -603,10 +759,23 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           pinchRAF.current = null;
         }
       }
-      if (track?.pointerId === e.pointerId) {
+      if (track) {
         touchTrack.current = null;
+        if (track.consumed) {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+        // Runs regardless of consumed: a genuine tap that fell through to
+        // whatever tool is active still needs to be recorded as "last tap"
+        // so the NEXT touch can recognize itself as a possible second tap.
         handleTapForDoubleTap(e, track);
+        return;
       }
+      if (wasPinching) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      // else: a lone, un-consumed touch ending — let native tool behavior see it.
     }
   }
 
@@ -639,16 +808,23 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     syncPage(scrollX, scrollY, zoomValue);
   }
 
-  // Converts the drawn freeform loop to scene coordinates and selects every
-  // element whose center falls inside it — then leaves Excalidraw's own
-  // "selection" tool to take over from there (its usual group box/resize
-  // handles/drag-to-move-together UI works on whatever we select here, same
-  // as if the user had made a rectangular marquee selection).
-  function finalizeLasso() {
-    const lasso = lassoDrawing.current;
-    lassoDrawing.current = null;
+  // MS-Paint-style selection: converts the drawn region (rectangle or
+  // freeform loop) to a scene-coordinate polygon, then — for every freedraw
+  // stroke only partially inside it — literally cuts the stroke at the
+  // boundary via clipPolylineByPolygon, replacing it with separate "inside"
+  // (selected) and "outside" (left behind, unselected) pieces. A stroke
+  // entirely inside or entirely outside is left as a single piece (just
+  // selected, or just untouched). Non-freedraw elements (shapes/text) can't
+  // sensibly be "cut", so those are selected whole if the region touches
+  // their bounding box at all. Leaves Excalidraw's own "selection" tool to
+  // take over from there — its usual group box/resize handles/drag-
+  // together UI works on whatever ends up selected here exactly as if the
+  // user had made a native marquee selection.
+  function finalizeSelection() {
+    const sel = selectionDrawing.current;
+    selectionDrawing.current = null;
     redrawOverlay();
-    if (!lasso || lasso.points.length < 3) return;
+    if (!sel) return;
 
     const api = excalidrawAPIRef.current;
     if (!api) return;
@@ -661,15 +837,87 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       scrollX: appState.scrollX,
       scrollY: appState.scrollY,
     };
-    const scenePolygon = lasso.points.map((p) => viewportCoordsToSceneCoords({ clientX: p.clientX, clientY: p.clientY }, sceneOpts));
+    const toScene = (p) => viewportCoordsToSceneCoords({ clientX: p.clientX, clientY: p.clientY }, sceneOpts);
 
-    const selectedElementIds = {};
-    for (const el of api.getSceneElements()) {
-      const cx = el.x + el.width / 2;
-      const cy = el.y + el.height / 2;
-      if (pointInPolygon(cx, cy, scenePolygon)) selectedElementIds[el.id] = true;
+    let polygon;
+    if (sel.mode === 'rect') {
+      const a = toScene(sel.points[0]);
+      const b = toScene(sel.points[sel.points.length - 1]);
+      const minX = Math.min(a.x, b.x);
+      const maxX = Math.max(a.x, b.x);
+      const minY = Math.min(a.y, b.y);
+      const maxY = Math.max(a.y, b.y);
+      if (maxX - minX < 3 || maxY - minY < 3) return; // too small — an accidental tap, not a drag
+      polygon = [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ];
+    } else {
+      if (sel.points.length < 3) return;
+      polygon = sel.points.map(toScene);
+      const xs = polygon.map((p) => p.x);
+      const ys = polygon.map((p) => p.y);
+      if (Math.max(...xs) - Math.min(...xs) < 3 || Math.max(...ys) - Math.min(...ys) < 3) return;
     }
-    api.updateScene({ appState: { selectedElementIds, selectedGroupIds: {} } });
+
+    const elements = api.getSceneElementsIncludingDeleted();
+    const newElements = [];
+    const selectedElementIds = {};
+
+    for (const el of elements) {
+      if (el.isDeleted) {
+        newElements.push(el);
+        continue;
+      }
+      if (el.type === 'freedraw') {
+        const absPoints = el.points.map((p, i) => ({
+          x: el.x + p[0],
+          y: el.y + p[1],
+          pressure: el.pressures?.[i] ?? 0.5,
+        }));
+        const { insideRuns, outsideRuns } = clipPolylineByPolygon(absPoints, polygon);
+        if (insideRuns.length === 0) {
+          newElements.push(el); // untouched — none of it is in the selection
+          continue;
+        }
+        if (outsideRuns.length === 0) {
+          // Entirely inside — keep the original element (preserves its id/
+          // history) rather than rebuilding identical geometry, just select it.
+          newElements.push(el);
+          selectedElementIds[el.id] = true;
+          continue;
+        }
+        for (const run of outsideRuns) {
+          if (run.length < 2) continue;
+          newElements.push(
+            strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure })
+          );
+        }
+        for (const run of insideRuns) {
+          if (run.length < 2) continue;
+          const piece = strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure });
+          newElements.push(piece);
+          selectedElementIds[piece.id] = true;
+        }
+      } else {
+        newElements.push(el);
+        if (boundingBoxIntersectsPolygon(el, polygon)) selectedElementIds[el.id] = true;
+      }
+    }
+
+    api.updateScene({ elements: newElements, appState: { selectedElementIds, selectedGroupIds: {} } });
+    scheduleSave();
+
+    // Immediately hand off to Excalidraw's own plain "selection" tool
+    // (move/resize) rather than staying in draw-a-selection-region mode —
+    // otherwise the very next drag, meant to move what was just selected,
+    // would be reinterpreted by us as drawing *another* selection region
+    // and cut it again. This is also just how the gesture should feel:
+    // select, then immediately drag to move — not select, then re-arm a
+    // tool button before you can move anything.
+    setSelectionTool(null);
   }
 
   function finalizeStroke() {
@@ -757,13 +1005,23 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         )}
         <button
           className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium shadow-sm ring-1 transition ${
-            lassoMode
+            selectionTool === 'rect'
               ? 'bg-accent text-white ring-accent'
               : 'bg-white text-neutral-700 ring-neutral-200 hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700'
           }`}
-          onClick={toggleLasso}
+          onClick={() => selectTool('rect')}
         >
-          ✂️ {t('canvas.lasso')}
+          ▭ {t('canvas.rectSelect')}
+        </button>
+        <button
+          className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium shadow-sm ring-1 transition ${
+            selectionTool === 'freeform'
+              ? 'bg-accent text-white ring-accent'
+              : 'bg-white text-neutral-700 ring-neutral-200 hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700'
+          }`}
+          onClick={() => selectTool('freeform')}
+        >
+          ✂️ {t('canvas.freeSelect')}
         </button>
         <div className="relative">
           <button
@@ -805,7 +1063,10 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       <div
         ref={containerRefCallback}
         className={`quarc-canvas-page relative flex-1 overflow-hidden bg-neutral-300 dark:bg-neutral-800 ${isPenActive ? 'quarc-pen-active' : ''}`}
-        style={{ touchAction: isPenActive || lassoMode ? 'none' : 'auto' }}
+        style={{
+          touchAction: isPenActive || selectionTool ? 'none' : 'auto',
+          cursor: selectionTool ? 'crosshair' : undefined,
+        }}
         onPointerDownCapture={handlePointerDownCapture}
         onPointerMoveCapture={handlePointerMoveCapture}
         onPointerUpCapture={handlePointerUpCapture}
