@@ -10,12 +10,25 @@ const { requireAuth } = require('../middleware/auth');
 const SECRET = () => process.env.JWT_SECRET || 'insecure-default-change-in-production';
 const SECURE_COOKIE = process.env.SECURE_COOKIE === 'true';
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
+
+// Fixed at login — no sliding renewal from activity, no server-side session
+// to revoke, just this JWT's exp claim and the cookie's own maxAge. 7 days
+// meant every user across every Quarc app got logged out weekly, all at
+// once whenever a batch of them had logged in around the same time (e.g.
+// after an app update forced a re-login). This is a personal, self-hosted
+// suite behind its own auth + VPN, not a public multi-tenant service, so a
+// short expiry mostly just means more frequent forced logins rather than
+// meaningful extra safety — see Quarc Music's own (now unreachable) auth.js,
+// which already made this exact call. Configurable since every app that
+// shares this JWT_SECRET is affected by it.
+const SESSION_DAYS = Number(process.env.SESSION_LIFETIME_DAYS || 90);
+const SESSION_LIFETIME = `${SESSION_DAYS}d`;
 const COOKIE_OPTS = {
   httpOnly: true,
   // SameSite=none required when an APK (capacitor://localhost) or a different
   // app's origin sends requests to this shared service cross-origin.
   sameSite: SECURE_COOKIE ? 'none' : 'lax',
-  maxAge: 7 * 24 * 60 * 60 * 1000,
+  maxAge: SESSION_DAYS * 24 * 60 * 60 * 1000,
   secure: SECURE_COOKIE,
   domain: COOKIE_DOMAIN,
 };
@@ -32,7 +45,7 @@ router.post('/login', async (req, res) => {
   const token = jwt.sign(
     { id: user.id, username: user.username, role: user.role },
     SECRET(),
-    { expiresIn: '7d' }
+    { expiresIn: SESSION_LIFETIME }
   );
 
   res.cookie('token', token, COOKIE_OPTS);
@@ -55,7 +68,7 @@ router.post('/register', async (req, res) => {
   db.prepare('INSERT INTO users (id, username, password_hash, salt, role) VALUES (?, ?, ?, ?, ?)')
     .run(id, username.trim(), hash, salt, 'user');
 
-  const token = jwt.sign({ id, username: username.trim(), role: 'user' }, SECRET(), { expiresIn: '7d' });
+  const token = jwt.sign({ id, username: username.trim(), role: 'user' }, SECRET(), { expiresIn: SESSION_LIFETIME });
   res.cookie('token', token, COOKIE_OPTS);
   res.json({ id, username: username.trim(), role: 'user' });
 });
