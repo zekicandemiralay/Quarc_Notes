@@ -21,7 +21,13 @@ const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
 // meaningful extra safety — see Quarc Music's own (now unreachable) auth.js,
 // which already made this exact call. Configurable since every app that
 // shares this JWT_SECRET is affected by it.
-const SESSION_DAYS = Number(process.env.SESSION_LIFETIME_DAYS || 90);
+//
+// 365, not longer: Chrome/Edge and every Chromium WebView (the Android app,
+// Tauri's WebView2 on Windows) cap a cookie's Max-Age at 400 days no matter
+// what the server sends, silently truncating anything past that — so there
+// is no gain from asking for more, only a false sense of it. 365 is a clean
+// number safely under that cap with no edge-case risk from exact timing.
+const SESSION_DAYS = Number(process.env.SESSION_LIFETIME_DAYS || 365);
 const SESSION_LIFETIME = `${SESSION_DAYS}d`;
 const COOKIE_OPTS = {
   httpOnly: true,
