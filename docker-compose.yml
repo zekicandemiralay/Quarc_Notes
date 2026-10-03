@@ -10,6 +10,13 @@ services:
       - DB_PATH=/app/data/notes.db
       - ATTACHMENTS_DIR=/app/data/attachments
       - JWT_SECRET=${JWT_SECRET:-insecure-default-change-in-production}
+      # Must match quarc-auth's own SECURE_COOKIE. This backend never issues
+      # the original login cookie (quarc-auth does), but it DOES re-issue a
+      # renewed one on a sliding session (see middleware/auth.js) — and a
+      # renewal signed with the wrong sameSite/secure would stop reaching the
+      # server from a cross-origin client (e.g. the Android app's WebView)
+      # that the original cookie reached just fine.
+      - SECURE_COOKIE=${SECURE_COOKIE:-true}
     restart: unless-stopped
     networks:
       - app-network
