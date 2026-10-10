@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 const SECRET = () => process.env.JWT_SECRET || 'insecure-default-change-in-production';
 const SECURE_COOKIE = process.env.SECURE_COOKIE === 'true';
@@ -104,6 +104,48 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
   const newHash = await bcrypt.hash(newPassword, 12);
   getDb().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user.id);
+  res.json({ ok: true });
+});
+
+// Lets a calling app's admin panel show the real, current account list —
+// without this, a user who registered through one app but never happened to
+// make an authenticated request against another would never appear in that
+// other app's locally-mirrored list at all.
+router.get('/admin/users', requireAdmin, (_req, res) => {
+  const users = getDb()
+    .prepare('SELECT id, username, role, created_at FROM users ORDER BY created_at')
+    .all();
+  res.json(users);
+});
+
+// Deleting the account has to happen here — a calling app deleting only its
+// own local mirror row left the real account untouched, so the person could
+// still log in everywhere and the row just came back on their next request.
+router.delete('/admin/users/:id', requireAdmin, (req, res) => {
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account' });
+  }
+  getDb().prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Every Quarc app's admin panel has its own "reset this user's password"
+// button, left over from before accounts moved here — all of them end up
+// calling this, since this is the only place a password actually lives now.
+// req.user is already an admin (requireAdmin verified the same JWT the
+// calling app's own admin check just verified), so no separate secret is
+// needed between services — the shared JWT_SECRET is the trust boundary.
+router.post('/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+  const db = getDb();
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const newHash = await bcrypt.hash(newPassword, 12);
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.params.id);
   res.json({ ok: true });
 });
 
