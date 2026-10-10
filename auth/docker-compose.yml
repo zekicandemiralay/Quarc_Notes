@@ -13,6 +13,11 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - SECURE_COOKIE=${SECURE_COOKIE:-true}
+      # Documented in .env.example and defaulted in code (365), but never
+      # actually wired through here — so overriding it in .env alone did
+      # nothing; only a code change would have. Added so it follows the
+      # same pattern as every other setting in this file.
+      - SESSION_LIFETIME_DAYS=${SESSION_LIFETIME_DAYS:-365}
     restart: unless-stopped
     networks:
       - quarcnet-shared
