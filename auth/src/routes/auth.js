@@ -107,6 +107,20 @@ router.post('/change-password', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Any logged-in user, not just admins — a friends feature needs to find
+// someone by username, and the only existing user lookup (/admin/users)
+// is gated behind requireAdmin and dumps everyone. Capped at 10 and 2+
+// characters so it's a reasonable typeahead, not a full account directory
+// handed to anyone who asks.
+router.get('/users/search', requireAuth, (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json([]);
+  const rows = getDb().prepare(
+    'SELECT id, username FROM users WHERE username LIKE ? AND id != ? ORDER BY username LIMIT 10'
+  ).all(`%${q}%`, req.user.id);
+  res.json(rows);
+});
+
 // Lets a calling app's admin panel show the real, current account list —
 // without this, a user who registered through one app but never happened to
 // make an authenticated request against another would never appear in that
