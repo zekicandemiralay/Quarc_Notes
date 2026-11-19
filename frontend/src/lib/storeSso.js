@@ -74,7 +74,7 @@ export const STORE_DOWNLOAD_URL = 'https://github.com/zekicandemiralay/Quarc_Sto
 const STORE_PROMO_UNTIL = {
   'com.quarc.music': '1.0.85', //     1.0.75 – 1.0.84
   'com.quarc.notes': '1.2.14', //     1.2.4  – 1.2.13
-  'com.quarc.weather': '1.0.16', //   1.0.6  – 1.0.15
+  'com.quarc.weather': '1.0.19', //   1.0.9  – 1.0.18
   'com.quarc.translate': '1.0.12', // 1.0.2  – 1.0.11
   'com.quarc.calendar': '1.0.12', //  1.0.2  – 1.0.11
 };
