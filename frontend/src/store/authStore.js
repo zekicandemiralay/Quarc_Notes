@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiUrl } from '../lib/apiUrl';
+import { syncFromStore, watchStoreSession } from '../lib/storeSso';
 
 const useAuthStore = create((set, get) => ({
   user: JSON.parse(localStorage.getItem('quarc_user') || 'null'),
@@ -29,6 +30,9 @@ const useAuthStore = create((set, get) => ({
   },
 
   async checkSession() {
+    // On Android, Quarc Store (if installed) is the primary login source:
+    // this applies its sign-in/sign-out to this app's cookie, if it changed.
+    await syncFromStore();
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
@@ -49,5 +53,8 @@ const useAuthStore = create((set, get) => ({
     }
   },
 }));
+
+// Signing in/out in Quarc Store applies as soon as the user switches back here.
+watchStoreSession(() => useAuthStore.getState().checkSession());
 
 export default useAuthStore;

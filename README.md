@@ -25,18 +25,20 @@ For the person who owns and runs the server.
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - A machine that stays on, running [Tailscale](https://tailscale.com) with HTTPS Certificates enabled
-- The `quarc-auth` shared login service running (see [auth/README.md](auth/README.md)) — this is what makes one account work across Quarc Music and Quarc Notes
+- The `quarc-auth` shared login service running (it lives in the [Quarc Store](https://github.com/zekicandemiralay/Quarc_Store) repo, in `auth/`) — this is what makes one account work across every Quarc app
 
 ### Step 1 — Set up the shared network and Quarc Auth (once, if not already done)
 
+The shared login lives in the Quarc Store repo:
+
 ```bash
-docker network create quarcnet-shared
-cd auth
-cp .env.example .env   # set a real JWT_SECRET
-docker compose up -d --build
+git clone https://github.com/zekicandemiralay/Quarc_Store.git
+cd Quarc_Store
+cp auth/.env.example auth/.env   # set a real JWT_SECRET
+bash deploy.sh auth              # also creates the quarcnet-shared network
 ```
 
-If you already run Quarc Music, see [auth/README.md](auth/README.md) for how to migrate
+If you already run Quarc Music, see `Quarc_Store/auth/README.md` for how to migrate
 its existing users into the shared login instead of starting from zero.
 
 ### Step 2 — Clone and configure Quarc Notes
@@ -47,7 +49,7 @@ cd Quarc_Notes
 cp .env.example .env
 ```
 
-Set `JWT_SECRET` in `.env` to the **exact same value** as `auth/.env`.
+Set `JWT_SECRET` in `.env` to the **exact same value** as `Quarc_Store/auth/.env`.
 
 ### Step 3 — Start the server
 
@@ -87,7 +89,7 @@ bash check.sh                # full health check
 
 | Variable | Default | Description |
 |---|---|---|
-| `JWT_SECRET` | *(insecure default)* | Must match `auth/.env` exactly — change this in production |
+| `JWT_SECRET` | *(insecure default)* | Must match `Quarc_Store/auth/.env` exactly — change this in production |
 
 ---
 

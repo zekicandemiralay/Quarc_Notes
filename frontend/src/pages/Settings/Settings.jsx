@@ -1,3 +1,4 @@
+import StorePromo from '../../components/StorePromo';
 import { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -87,6 +88,7 @@ function UpdateSection() {
                 </a>
               )
             )}
+            <StorePromo />
           </div>
         )}
         <button onClick={check} disabled={loading} className="mt-2 text-xs text-neutral-400 hover:text-neutral-700 disabled:opacity-40 dark:hover:text-neutral-200">

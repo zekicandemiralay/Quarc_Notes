@@ -164,7 +164,12 @@ jobs:
         working-directory: mobile/android
         run: |
           TAG=${GITHUB_REF#refs/tags/v}
-          CODE=$(echo $TAG | tr -d '.')
+          # MAJOR*10000 + MINOR*100 + PATCH (same as Quarc Music), so it always
+          # grows. Just removing the dots went backwards (1.0.10 -> 1010, then
+          # 1.1.0 -> 110), and Android refuses an update with a lower versionCode.
+          # Needs MINOR and PATCH to stay under 100.
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$TAG"
+          CODE=$((MAJOR * 10000 + MINOR * 100 + ${PATCH:-0}))
           sed -i "s/versionCode [0-9]*/versionCode $CODE/" app/build.gradle
           sed -i "s/versionName \"[^\"]*\"/versionName \"$TAG\"/" app/build.gradle
 

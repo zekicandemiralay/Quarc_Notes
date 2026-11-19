@@ -61,7 +61,7 @@ QA_CID=$(docker ps -q --filter "name=quarc-auth" | head -1)
 if [ -n "$QA_CID" ]; then
   ok "quarc-auth: running (shared login service)"
 else
-  fail "quarc-auth: not running — logins will fail. See auth/README.md"
+  fail "quarc-auth: not running — logins will fail. See Quarc_Store/auth/README.md"
 fi
 
 # ════════════════════════════════════════════════════════════════════════

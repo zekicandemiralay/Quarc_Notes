@@ -1,3 +1,4 @@
+import StorePromo from '../../components/StorePromo';
 import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -71,6 +72,7 @@ export default function Layout() {
           <button onClick={handleInstallUpdate} className="ml-2 underline underline-offset-2 hover:text-emerald-200">
             {t('updates.installNow')}
           </button>
+          <StorePromo compact />
           <button onClick={dismissUpdate} className="ml-2 hover:text-emerald-200">✕</button>
         </div>
       )}

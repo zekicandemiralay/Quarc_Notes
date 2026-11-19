@@ -3,6 +3,8 @@
 // pointed at this repo. Native platforms only (Capacitor/Tauri); plain web
 // has no "installed version" concept, so it only ever links out.
 
+import { updateViaStore } from './storeSso';
+
 const REPO = 'zekicandemiralay/Quarc_Notes';
 
 export function semverGt(a, b) {
@@ -48,7 +50,11 @@ export function getDownloadUrl(release, platform) {
 
 export function installUpdate(platform, url, version) {
   if (platform === 'android') {
-    window?.Capacitor?.Plugins?.Updater?.downloadUpdate({ url, version });
+    // Quarc Store installed? Update there (it becomes this app's installer, so
+    // later updates can be silent); otherwise download the APK ourselves.
+    updateViaStore().then((viaStore) => {
+      if (!viaStore) window?.Capacitor?.Plugins?.Updater?.downloadUpdate({ url, version });
+    });
   } else if (platform === 'desktop') {
     // The NSIS installer updates in place.
     window.__TAURI__.shell.open(url);
