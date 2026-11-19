@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "npx cap sync android",
-    "open": "npx cap open android"
+    "open": "npx cap open android",
+    "icons": "npx capacitor-assets generate --android --iconBackgroundColor \"#ffffff\" --iconBackgroundColorDark \"#ffffff\" --splashBackgroundColor \"#ffffff\" --splashBackgroundColorDark \"#111111\""
   },
   "dependencies": {
     "@capacitor/android": "^6.0.0",
