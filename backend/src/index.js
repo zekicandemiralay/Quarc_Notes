@@ -8,22 +8,28 @@ const searchRoutes = require('./routes/search');
 const syncRoutes = require('./routes/sync');
 const attachmentsRoutes = require('./routes/attachments');
 
-const app = express();
-const PORT = process.env.PORT || 3003;
+function createApp() {
+  const app = express();
+  app.use(cors({ origin: true, credentials: true }));
+  // Handwritten notebooks with many pages of ink are big JSON documents.
+  app.use(express.json({ limit: '50mb' }));
+  app.use(cookieParser());
 
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '10mb' }));
-app.use(cookieParser());
+  app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'quarc-notes-backend' }));
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'quarc-notes-backend' }));
+  app.use('/api/pages', requireAuth, pagesRoutes);
+  app.use('/api/search', requireAuth, searchRoutes);
+  app.use('/api/sync', requireAuth, syncRoutes);
+  app.use('/api/attachments', requireAuth, attachmentsRoutes);
+  return app;
+}
 
-app.use('/api/pages', requireAuth, pagesRoutes);
-app.use('/api/search', requireAuth, searchRoutes);
-app.use('/api/sync', requireAuth, syncRoutes);
-app.use('/api/attachments', requireAuth, attachmentsRoutes);
+module.exports = { createApp };
 
-initDb();
-
-app.listen(PORT, () => {
-  console.log(`Quarc Notes backend listening on :${PORT}`);
-});
+if (require.main === module) {
+  const PORT = process.env.PORT || 3003;
+  initDb();
+  createApp().listen(PORT, () => {
+    console.log(`Quarc Notes backend listening on :${PORT}`);
+  });
+}

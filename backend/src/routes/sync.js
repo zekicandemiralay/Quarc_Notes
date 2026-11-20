@@ -1,89 +1,159 @@
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../db');
-const { extractText, extractWikilinkIds } = require('../services/content');
+const { getDb, NOW } = require('../db');
+const store = require('../services/pageStore');
 
-function reindexFts(db, page) {
-  db.prepare('DELETE FROM pages_fts WHERE page_id = ?').run(page.id);
-  db.prepare('INSERT INTO pages_fts (page_id, title, body) VALUES (?, ?, ?)')
-    .run(page.id, page.title, extractText(JSON.parse(page.content_json || '[]')));
-}
-
-function syncLinks(db, page) {
-  db.prepare('DELETE FROM links WHERE source_page_id = ?').run(page.id);
-  const targets = extractWikilinkIds(JSON.parse(page.content_json || '[]'));
-  const insert = db.prepare('INSERT OR IGNORE INTO links (source_page_id, target_page_id) VALUES (?, ?)');
-  for (const targetId of targets) insert.run(page.id, targetId);
-}
-
-// Pull: everything for this user updated strictly after `since` (an ISO/sqlite
-// datetime string), so the client can refresh its offline cache.
+// Pull: everything for this user updated since `since` (the serverTime the
+// client got from its previous pull), so it can refresh its offline cache.
+//
+// v=2 clients use an inclusive bound (they skip versions they already have,
+// so re-receiving the boundary is harmless and nothing written in the same
+// millisecond as the cursor can slip through) and also receive the ids of
+// pages deleted forever since then. Older app versions (no `v`) keep the
+// exact behavior they were built against.
 router.get('/pull', (req, res) => {
   const db = getDb();
-  const since = req.query.since || '1970-01-01 00:00:00';
-  const pages = db.prepare(
-    `SELECT * FROM pages WHERE user_id = ? AND updated_at > ? ORDER BY updated_at ASC`
-  ).all(req.user.id, since);
+  const v2 = req.query.v === '2';
+  const since = store.normalizeTs(req.query.since) || '1970-01-01 00:00:00';
+  const serverTime = db.prepare(`SELECT ${NOW} AS t`).get().t;
+  const pages = db
+    .prepare(`SELECT * FROM pages WHERE user_id = ? AND updated_at ${v2 ? '>=' : '>'} ? ORDER BY updated_at ASC`)
+    .all(req.user.id, since);
 
-  res.json({
-    serverTime: db.prepare("SELECT datetime('now') as t").get().t,
-    pages: pages.map((p) => ({
-      ...p,
-      content_json: JSON.parse(p.content_json || '[]'),
-      ink_json: JSON.parse(p.ink_json || '[]'),
-      canvas_settings: JSON.parse(p.canvas_settings || '{"pageSize":"A5","pageStyle":"lined"}'),
-    })),
-  });
+  const body = { serverTime, pages: pages.map(store.serialize) };
+  if (v2) {
+    body.deleted = db
+      .prepare('SELECT id FROM deleted_pages WHERE user_id = ? AND deleted_at >= ?')
+      .all(req.user.id, since)
+      .map((r) => r.id);
+  }
+  res.json(body);
 });
 
-// Push: client sends queued offline edits. Each mutation carries the page's
-// state as the client last saw/edited it, plus `base_updated_at` (the
-// updated_at the client had cached before editing). Last-write-wins: a
-// mutation is only applied if the server's current updated_at is not newer
-// than what the client based its edit on.
+// Older app versions send whole-page snapshots: { op: 'upsert'|'delete', id,
+// title, icon, type, content_json, ink_json, parent_id, sort_order,
+// canvas_settings, base_updated_at }. Translate to the v2 shape.
+function fromLegacy(m) {
+  if (m.op === 'delete') return { id: m.id, deleted: true };
+  const fields = {};
+  for (const key of ['title', 'icon', 'type', 'content_json', 'ink_json', 'parent_id', 'sort_order', 'canvas_settings']) {
+    if (m[key] !== undefined) fields[key] = m[key];
+  }
+  return { id: m.id, base_updated_at: m.base_updated_at, fields };
+}
+
+// Applies one mutation. v2 shape:
+//   { id, base_updated_at?, fields?: {...changed fields}, deleted?: bool, purge?: bool }
+// `fields` holds only what changed on the device, so concurrent edits of
+// different things (a rename here, writing there) both survive. Content
+// conflicts — another device changed the same page's content since this
+// edit's base — never lose data: drawings merge stroke by stroke, documents
+// keep the other device's version as a "conflict copy" page next to it.
+function applyMutation(db, userId, clientId, conflictLabel, raw, opts) {
+  const m = raw && (raw.fields || 'deleted' in raw || raw.purge) ? raw : fromLegacy(raw || {});
+  if (!m.id || typeof m.id !== 'string' || m.id.length > 64) return { id: raw?.id, status: 'error', error: 'invalid id' };
+
+  const anyRow = db.prepare('SELECT user_id FROM pages WHERE id = ?').get(m.id);
+  if (anyRow && anyRow.user_id !== userId) return { id: m.id, status: 'error', error: 'forbidden' };
+
+  if (m.purge) {
+    if (anyRow) store.purgeTree(db, userId, m.id);
+    return { id: m.id, status: 'ok', purged: true };
+  }
+
+  const fields = store.cleanFields(m.fields);
+  let current = store.getOwned(db, userId, m.id);
+  let writer = clientId;
+  const result = { id: m.id, status: 'ok' };
+
+  if (!current) {
+    if (store.isTombstoned(db, userId, m.id)) return { id: m.id, status: 'gone' };
+    // Trashing/restoring a page the server never received: nothing to do.
+    if (!Object.keys(fields).length) return { id: m.id, status: 'ok' };
+    // A sub-page created offline can reach us before its parent does when
+    // both are in the same batch: let the caller retry it after the rest.
+    if (fields.parent_id && !store.getOwned(db, userId, fields.parent_id) && opts?.canDefer?.(fields.parent_id)) {
+      return { id: m.id, status: 'defer' };
+    }
+    current = store.insertPage(db, userId, m.id, fields, clientId);
+  } else if (Object.keys(fields).length) {
+    const base = store.normalizeTs(m.base_updated_at);
+    // The device built this edit on an older version than the server has
+    // (or doesn't say which): send the result back so it also gets whatever
+    // else changed meanwhile — it skips pulling pages it has edits queued for.
+    if (!base || current.updated_at > base) result.stale = true;
+    const contentField = fields.ink_json !== undefined ? 'ink_json' : fields.content_json !== undefined ? 'content_json' : null;
+    if (contentField && !opts?.seen?.has(m.id) && store.hasContentConflict(current, contentField, fields[contentField], base, clientId)) {
+      if (contentField === 'ink_json') {
+        fields.ink_json = store.mergeScenes(store.parseJson(current.ink_json, null), fields.ink_json);
+        result.merged = true;
+        // The merged drawing is nobody's own write: if this device sends
+        // another edit built on its pre-merge copy, that must merge again
+        // rather than count as its own follow-up save and drop the strokes
+        // merged in from the other device.
+        writer = null;
+      } else {
+        result.conflict_copy_id = store.createConflictCopy(db, current, conflictLabel);
+      }
+    }
+    current = store.updatePageFields(db, userId, current, fields, writer);
+  }
+
+  if (m.deleted === true && !current.is_deleted) store.softDeleteTree(db, userId, m.id);
+  if (m.deleted === false && current.is_deleted) store.restoreTree(db, userId, m.id);
+
+  current = store.getOwned(db, userId, m.id);
+  result.updated_at = current.updated_at;
+  // The server's copy now differs from what the device sent (merged
+  // strokes, or a restore that moved it): send it back so the device
+  // doesn't have to wait for its next pull to see the result.
+  if (result.merged || result.stale || m.deleted === false) result.page = store.serialize(current);
+  delete result.stale;
+  return result;
+}
+
+// Push: the device's queued offline edits, applied in order in a single
+// transaction (all or nothing).
 router.post('/push', (req, res) => {
   const db = getDb();
-  const mutations = Array.isArray(req.body.mutations) ? req.body.mutations : [];
+  const mutations = Array.isArray(req.body.mutations) ? req.body.mutations.slice(0, 500) : [];
+  const clientId = typeof req.body.client_id === 'string' ? req.body.client_id.slice(0, 64) : null;
+  const conflictLabel = typeof req.body.conflict_label === 'string' ? req.body.conflict_label : null;
+
+  const createdInBatch = new Set(mutations.map((m) => m && m.id).filter(Boolean));
+  const seen = new Set();
   const results = [];
 
-  for (const m of mutations) {
-    const current = db.prepare('SELECT * FROM pages WHERE id = ? AND user_id = ?').get(m.id, req.user.id);
-
-    if (m.op === 'delete') {
-      if (current) db.prepare("UPDATE pages SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?").run(m.id);
-      results.push({ id: m.id, status: 'ok' });
-      continue;
-    }
-
-    if (current && m.base_updated_at && current.updated_at > m.base_updated_at) {
-      results.push({ id: m.id, status: 'conflict', server: current });
-      continue;
-    }
-
-    const canvasSettings = JSON.stringify(m.canvas_settings || { pageSize: 'A5', pageStyle: 'lined' });
-
-    if (current) {
-      db.prepare(`
-        UPDATE pages SET title = ?, icon = ?, content_json = ?, ink_json = ?,
-          parent_id = ?, sort_order = ?, type = ?, canvas_settings = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(m.title, m.icon || null, JSON.stringify(m.content_json || []), JSON.stringify(m.ink_json || []),
-        m.parent_id || null, m.sort_order || 0, m.type || 'doc', canvasSettings, m.id);
-    } else {
-      db.prepare(`
-        INSERT INTO pages (id, user_id, parent_id, title, icon, type, content_json, ink_json, sort_order, canvas_settings)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(m.id, req.user.id, m.parent_id || null, m.title || 'Untitled', m.icon || null, m.type || 'doc',
-        JSON.stringify(m.content_json || []), JSON.stringify(m.ink_json || []), m.sort_order || 0, canvasSettings);
-    }
-
-    const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(m.id);
-    reindexFts(db, page);
-    syncLinks(db, page);
-    results.push({ id: m.id, status: 'ok', updated_at: page.updated_at });
+  try {
+    db.transaction(() => {
+      let pending = mutations;
+      for (let pass = 0; pass < 3 && pending.length; pass++) {
+        const deferred = [];
+        for (const m of pending) {
+          let r;
+          try {
+            r = applyMutation(db, req.user.id, clientId, conflictLabel, m, {
+              seen,
+              canDefer: (parentId) => pass < 2 && createdInBatch.has(parentId),
+            });
+          } catch (err) {
+            r = { id: m?.id, status: 'error', error: err.message };
+          }
+          if (r.status === 'defer') deferred.push(m);
+          else {
+            if (r.status === 'ok') seen.add(r.id);
+            results.push(r);
+          }
+        }
+        pending = deferred;
+      }
+    })();
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 
   res.json({ results });
 });
 
 module.exports = router;
+module.exports.applyMutation = applyMutation;
