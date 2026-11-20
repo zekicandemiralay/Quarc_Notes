@@ -61,8 +61,15 @@ export function clipPolylineByPolygon(points, polygon) {
   let currentInside = pointInPolygon(points[0].x, points[0].y, polygon);
   let currentRun = [points[0]];
 
+  // A point lying exactly on the boundary is crossed twice (end of one
+  // segment, start of the next), which yields a zero-length run — a stray
+  // dot if kept — so runs without any length are dropped.
+  const hasLength = (run) => {
+    for (let i = 1; i < run.length; i++) if (Math.abs(run[i].x - run[0].x) > 1e-6 || Math.abs(run[i].y - run[0].y) > 1e-6) return true;
+    return false;
+  };
   const flush = () => {
-    if (currentRun.length > 1) (currentInside ? insideRuns : outsideRuns).push(currentRun);
+    if (currentRun.length > 1 && hasLength(currentRun)) (currentInside ? insideRuns : outsideRuns).push(currentRun);
   };
 
   for (let i = 1; i < points.length; i++) {

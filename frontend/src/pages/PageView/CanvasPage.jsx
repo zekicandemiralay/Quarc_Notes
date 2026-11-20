@@ -541,6 +541,12 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const d = drawing.current;
     if (d) {
       ctx.save();
+      const v = currentView();
+      if (v && d.sheet) {
+        ctx.beginPath();
+        ctx.rect((d.sheet.x + v.scrollX) * v.zoom, (d.sheet.y + v.scrollY) * v.zoom, d.sheet.width * v.zoom, d.sheet.height * v.zoom);
+        ctx.clip();
+      }
       ctx.globalAlpha = d.highlighter ? HIGHLIGHTER_OPACITY / 100 : 1;
       if (d.shape) {
         const pts = shapeOutline(d.shape.current);
@@ -622,9 +628,41 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     }
   }
 
+  // The sheet (scene rect) under a container-relative point, or null when
+  // the point is on the desk around / between the pages.
+  function sheetUnder(p) {
+    const v = currentView();
+    if (!v) return null;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const x = p.x / v.zoom - v.scrollX;
+    const y = p.y / v.zoom - v.scrollY;
+    if (x < 0 || x > dims.width) return null;
+    const top = sheetTop(sheetAt(y, s.pageCount, dims), dims);
+    if (y < top || y > top + dims.height) return null;
+    return { x: 0, y: top, width: dims.width, height: dims.height };
+  }
+
+  // Is a shape (screen coords) entirely on the stroke's sheet?
+  function shapeOnSheet(shape, d) {
+    const v = currentView();
+    const r = d.sheet;
+    if (!v || !r) return true;
+    const tol = 0.5;
+    return shapeOutline(shape).every((pt) => {
+      const x = pt.x / v.zoom - v.scrollX;
+      const y = pt.y / v.zoom - v.scrollY;
+      return x >= r.x - tol && x <= r.x + r.width + tol && y >= r.y - tol && y <= r.y + r.height + tol;
+    });
+  }
+
+  // Ink only goes on paper: a stroke can't start on the desk, and one that
+  // runs off the page is cut at its edge (see endStroke).
   function startStroke(e) {
     const rect = containerRef.current.getBoundingClientRect();
     gestureRect.current = rect;
+    const sheet = sheetUnder(localPoint(e, rect));
+    if (!sheet) return false;
     const s = settingsRef.current;
     const highlighter = s.tool === 'highlighter';
     const d = {
@@ -637,11 +675,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       shape: null,
       holdAnchor: null,
       holdTimer: null,
+      sheet,
     };
     d.points.push(localPoint(e, rect, d));
     drawing.current = d;
     capture(e);
     scheduleOverlay();
+    return true;
   }
 
   function moveStroke(e) {
@@ -652,7 +692,8 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     for (const ev of events && events.length ? events : [native]) d.points.push(localPoint(ev, rect, d));
     const p = d.points[d.points.length - 1];
     if (d.shape) {
-      d.shape.current = adjustShape(d.shape.base, d.shape.grab, p);
+      const next = adjustShape(d.shape.base, d.shape.grab, p);
+      if (shapeOnSheet(next, d)) d.shape.current = next;
     } else if (prefsRef.current.shapeSnap) {
       const radius = HOLD_RADIUS[d.pointerType] ?? 6;
       if (!d.holdAnchor || Math.hypot(p.x - d.holdAnchor.x, p.y - d.holdAnchor.y) > radius) {
@@ -669,7 +710,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   function trySnap(d) {
     if (drawing.current !== d || d.shape) return;
     const shape = recognizeShape(d.points);
-    if (!shape) return;
+    if (!shape || !shapeOnSheet(shape, d)) return;
     const grab = d.points[d.points.length - 1];
     d.shape = { base: shape, grab, current: shape };
     try {
@@ -707,15 +748,30 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       const pts = d.points.map((p) => ({ ...toScene(p), pressure: p.pressure }));
       // A tap is a dot (the i's and full stops of handwriting).
       if (pts.length === 1) pts.push({ ...pts[0], x: pts[0].x + 0.1 / zoom });
-      const el = strokeToFreedrawElement({
-        points: pts,
-        color: d.color,
-        size: d.size / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * zoom),
-        simulatePressure: false,
-      });
-      el.opacity = opacity;
-      el.roughness = 0;
-      added = [el];
+      const r = d.sheet;
+      const onSheet = (p) => p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+      const runs = pts.every(onSheet)
+        ? [pts]
+        : clipPolylineByPolygon(pts, [
+            { x: r.x, y: r.y },
+            { x: r.x + r.width, y: r.y },
+            { x: r.x + r.width, y: r.y + r.height },
+            { x: r.x, y: r.y + r.height },
+          ]).insideRuns;
+      added = runs
+        .filter((run) => run.length >= 2)
+        .map((run) => {
+          const el = strokeToFreedrawElement({
+            points: run,
+            color: d.color,
+            size: d.size / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * zoom),
+            simulatePressure: false,
+          });
+          el.opacity = opacity;
+          el.roughness = 0;
+          return el;
+        });
+      if (!added.length) return;
     }
     const existing = api.getSceneElementsIncludingDeleted();
     // Highlighter goes underneath the ink, like on paper.
@@ -951,8 +1007,13 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     if (!(e.target instanceof HTMLCanvasElement) && e.target !== containerRef.current) return;
     stopInertia();
     stopInitialView();
-    if (selectionTool) {
-      if (selectionDrawing.current) return;
+    const fingerSelects = e.pointerType !== 'touch' || prefsRef.current.fingerDraws;
+    if (selectionTool && fingerSelects && !(e.pointerType === 'touch' && Date.now() - lastPenActivity.current < PALM_WINDOW_MS)) {
+      if (selectionDrawing.current) {
+        consume(e);
+        return;
+      }
+      if (e.pointerType === 'pen') lastPenActivity.current = Date.now();
       consume(e);
       const rect = containerRef.current.getBoundingClientRect();
       gestureRect.current = rect;
@@ -1013,12 +1074,11 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       return;
     }
 
-    if (isDrawToolRef.current) {
+    if (isDrawToolRef.current || selectionTool) {
       consume(e);
       touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: true };
-      if (prefsRef.current.fingerDraws) {
-        startStroke(e);
-      } else {
+      // A finger that draws still scrolls when it lands on the desk.
+      if (!(prefsRef.current.fingerDraws && !selectionTool && startStroke(e))) {
         touchPan.current = {
           pointerId: e.pointerId,
           lastX: e.clientX,
@@ -1264,11 +1324,17 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           selectedElementIds[el.id] = true;
           continue;
         }
+        // A cut shape's pieces become ink of the same visible width (a
+        // freedraw of strokeWidth w is drawn ~6w wide at even pressure).
+        const size = el.type === 'freedraw' ? el.strokeWidth : el.strokeWidth / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * 2 * Math.SQRT1_2);
         const piece = (run) => {
-          const p = strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure });
+          const p = strokeToFreedrawElement({ points: run, color: el.strokeColor, size, simulatePressure: el.type === 'freedraw' && el.simulatePressure });
           p.opacity = el.opacity;
           return p;
         };
+        // Replaced, not just dropped: a deletion (bumped version) is what
+        // tells other devices' copies to let go of the uncut original.
+        newElements.push(newElementWith(el, { isDeleted: true }));
         for (const run of outsideRuns) if (run.length >= 2) newElements.push(piece(run));
         for (const run of insideRuns) {
           if (run.length < 2) continue;
