@@ -104,6 +104,108 @@ export function clipPolylineByPolygon(points, polygon) {
   return { insideRuns, outsideRuns };
 }
 
+// ---------- making cut pieces join seamlessly ----------
+//
+// Excalidraw draws freedraw through perfect-freehand with `streamline: 0.5`
+// and, for every stroke loaded from storage, `last: false` (its restore()
+// resets lastCommittedPoint). So a stroke's drawn end trails its last stored
+// point by roughly ¾ of the final pen-sample spacing. Nobody sees that at a
+// stroke's free end, but at a cut both pieces stopped short of the shared
+// cut point: a visible gap at each end of the selection (a few px for a
+// quickly written line). Repeating the end point lets the smoothing catch
+// up — each repeat closes ~57% of what's left, so after END_PINS repeats the
+// end sits on the cut point. Stored in the points themselves, so it holds
+// after reloads, on other devices and in older app versions.
+export const END_PINS = 10;
+
+export function pinEnd(run, count = END_PINS) {
+  const last = run[run.length - 1];
+  const out = run.slice();
+  for (let i = 0; i < count; i++) out.push({ ...last });
+  return out;
+}
+
+// A shape's outline (a line's two ends, a rectangle's corners) is far too
+// sparse for that smoothing: a 2-point piece is drawn only ~80% of its
+// length and corners get rounded off. Evenly spaced samples make a cut
+// shape's pieces look like the shape they came from.
+export function densify(run, step = 1) {
+  const out = [run[0]];
+  for (let i = 1; i < run.length; i++) {
+    const a = run[i - 1];
+    const b = run[i];
+    const n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step);
+    for (let k = 1; k < n; k++) {
+      const t = k / n;
+      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t });
+    }
+    out.push(b);
+  }
+  return out;
+}
+
+// Cuts an element's outline (getCuttableOutline) with the selection polygon
+// and prepares every piece to be drawn as freedraw that joins its neighbours
+// without a gap. A pen stroke keeps its own samples and only its cut ends
+// are pinned (its free ends stay exactly as they were drawn); a shape's
+// pieces are resampled (`step` ≈ half the line width keeps corners crisp)
+// and pinned at both kinds of end, matching the shape's exact ends.
+export function cutOutline(outline, polygon, { shape = false, step = 1 } = {}) {
+  const { insideRuns, outsideRuns } = clipPolylineByPolygon(outline, polygon);
+  // Not cut at all (wholly inside or outside): the element stays as it is.
+  if (!insideRuns.length || !outsideRuns.length) return { insideRuns, outsideRuns };
+  const end = outline[outline.length - 1];
+  const prepare = (run) => {
+    const pts = shape ? densify(run, step) : run;
+    return shape || run[run.length - 1] !== end ? pinEnd(pts) : pts;
+  };
+  return { insideRuns: insideRuns.map(prepare), outsideRuns: outsideRuns.map(prepare) };
+}
+
+// Pieces cut by older versions were stored without the pins, so their cut
+// ends still stop short. They're recognisable: a cut piece ends exactly
+// where another stroke starts (the shared cut point). Pins those ends — a
+// version bump, so the repair syncs like any edit. Returns the same array
+// when there's nothing to repair; idempotent (a pinned end repeats its last
+// point, and those are skipped).
+export function pinCutJoints(elements) {
+  const live = (el) => el && el.type === 'freedraw' && !el.isDeleted && Array.isArray(el.points) && el.points.length >= 2;
+  const cell = (x, y) => `${Math.round(x)}:${Math.round(y)}`;
+  const starts = new Map();
+  for (const el of elements) {
+    if (!live(el)) continue;
+    const s = { id: el.id, x: el.x + el.points[0][0], y: el.y + el.points[0][1] };
+    const k = cell(s.x, s.y);
+    if (!starts.has(k)) starts.set(k, []);
+    starts.get(k).push(s);
+  }
+  const startsAt = (id, x, y) => {
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (const s of starts.get(cell(x + dx, y + dy)) || []) if (s.id !== id && Math.abs(s.x - x) < 1e-3 && Math.abs(s.y - y) < 1e-3) return true;
+    return false;
+  };
+  let changed = false;
+  const out = elements.map((el) => {
+    if (!live(el)) return el;
+    const pts = el.points;
+    const [lx, ly] = pts[pts.length - 1];
+    const [px, py] = pts[pts.length - 2];
+    if ((lx === px && ly === py) || !startsAt(el.id, el.x + lx, el.y + ly)) return el;
+    changed = true;
+    const pressures = el.pressures?.length === pts.length ? [...el.pressures, ...Array(END_PINS).fill(el.pressures[pts.length - 1])] : el.pressures;
+    return {
+      ...el,
+      points: [...pts, ...Array.from({ length: END_PINS }, () => [lx, ly])],
+      pressures,
+      version: (el.version || 1) + 1,
+      versionNonce: Math.floor(Math.random() * 2 ** 31),
+      updated: Date.now(),
+    };
+  });
+  return changed ? out : elements;
+}
+
 // For elements with no cuttable outline (text, images, frames, ...), this
 // decides whether the selection area touches the element's bounding box at
 // all — checked three ways: either shape's corners inside the other shape,

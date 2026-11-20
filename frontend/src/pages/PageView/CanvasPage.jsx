@@ -19,7 +19,7 @@ import { on } from '../../lib/events';
 import useSettings from '../../store/settingsStore';
 import Popover, { MenuItem, MenuSeparator } from '../../components/Popover';
 import CanvasToolbar from './canvas/CanvasToolbar';
-import { clipPolylineByPolygon, boundingBoxIntersectsPolygon, getCuttableOutline } from './canvas/selectionCut';
+import { clipPolylineByPolygon, boundingBoxIntersectsPolygon, getCuttableOutline, cutOutline, pinCutJoints } from './canvas/selectionCut';
 import { shapeToElements, inkWidth, eraserHits, EXCALIDRAW_FREEDRAW_SIZE_FACTOR } from './canvas/elements';
 import {
   sheetDims,
@@ -130,7 +130,8 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const raw = page.ink_json;
     const legacy = isLegacyInkFormat(raw);
     const scene = legacy ? convertLegacyInk(raw) : raw || {};
-    return { elements: scene.elements || [], files: scene.files || {}, legacy };
+    // Closes the gaps left by cuts made before 1.2.10 (saved with the next edit).
+    return { elements: pinCutJoints(scene.elements || []), files: scene.files || {}, legacy };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
 
@@ -390,7 +391,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         }
         if (!Array.isArray(remote?.elements)) return;
         if (remote.files) api.addFiles(Object.values(remote.files));
-        const merged = reconcileElements(api.getSceneElementsIncludingDeleted(), remote.elements, api.getAppState());
+        const merged = reconcileElements(api.getSceneElementsIncludingDeleted(), pinCutJoints(remote.elements), api.getAppState());
         api.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER });
         contentBase.current = row.server_updated_at;
         savedVersion.current = getSceneVersion(remote.elements);
@@ -1314,7 +1315,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       }
       const outline = getCuttableOutline(el);
       if (outline) {
-        const { insideRuns, outsideRuns } = clipPolylineByPolygon(outline, polygon);
+        // Pieces are prepared to meet at the cut without a gap (see cutOutline).
+        const shape = el.type !== 'freedraw';
+        const { insideRuns, outsideRuns } = cutOutline(outline, polygon, { shape, step: Math.max(0.25, el.strokeWidth / 2) });
         if (insideRuns.length === 0) {
           newElements.push(el);
           continue;
@@ -1326,7 +1329,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         }
         // A cut shape's pieces become ink of the same visible width (a
         // freedraw of strokeWidth w is drawn ~6w wide at even pressure).
-        const size = el.type === 'freedraw' ? el.strokeWidth : el.strokeWidth / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * 2 * Math.SQRT1_2);
+        const size = shape ? el.strokeWidth / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * 2 * Math.SQRT1_2) : el.strokeWidth;
         const piece = (run) => {
           const p = strokeToFreedrawElement({ points: run, color: el.strokeColor, size, simulatePressure: el.type === 'freedraw' && el.simulatePressure });
           p.opacity = el.opacity;
