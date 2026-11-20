@@ -1,54 +1,84 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Excalidraw, viewportCoordsToSceneCoords, newElementWith } from '@excalidraw/excalidraw';
+import {
+  Excalidraw,
+  newElementWith,
+  CaptureUpdateAction,
+  reconcileElements,
+  getSceneVersion,
+} from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { useTranslation } from 'react-i18next';
+import { ChevronUp, ChevronDown, MoreHorizontal, FilePlus2, Trash2, Plus, ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { isLegacyInkFormat, convertLegacyInk } from '../../lib/inkMigration';
 import { strokeToFreedrawElement } from '../../lib/freehandElement';
 import { strokeToPath2D, STROKE_OPTIONS } from '../../lib/freehand';
+import { recognizeShape, adjustShape, shapeOutline } from '../../lib/shapeRecognition';
+import { db } from '../../lib/db';
+import { on } from '../../lib/events';
+import useSettings from '../../store/settingsStore';
+import Popover, { MenuItem, MenuSeparator } from '../../components/Popover';
+import CanvasToolbar from './canvas/CanvasToolbar';
+import { clipPolylineByPolygon, boundingBoxIntersectsPolygon, getCuttableOutline } from './canvas/selectionCut';
+import { shapeToElements, inkWidth, eraserHits, EXCALIDRAW_FREEDRAW_SIZE_FACTOR } from './canvas/elements';
+import {
+  sheetDims,
+  sheetTop,
+  docHeight,
+  sheetAt,
+  sheetsNeeded,
+  fitPageZoom,
+  fitWidthZoom,
+  clampView,
+  viewForSheet,
+  drawPaper,
+  paperColors,
+  PAGE_GAP,
+  MAX_ZOOM,
+} from './canvas/notebook';
 
-// Dimensions are in scene units (same coordinate space Excalidraw elements
-// live in, i.e. CSS px at zoom 1). A CSS px is defined as 1/96in, so these
-// are real paper sizes converted at 96dpi (e.g. A5 = 148 x 210mm) — not
-// points (1/72in), which is what these were before and rendered the page at
-// 72/96 = 75% of true size (visibly closer to A6 than A5). This define an
-// actual finite sheet, not just a visual aspect ratio: the page is rendered
-// as a sized/positioned rect synced to Excalidraw's own scroll/zoom (see
-// syncPage below), so it has real edges instead of tiling infinitely.
-const PAGE_SIZES = {
-  A5: { width: 559, height: 794, label: 'A5' },
-  A4: { width: 794, height: 1123, label: 'A4' },
-  Letter: { width: 816, height: 1056, label: 'Letter' },
+const DEFAULT_SETTINGS = {
+  pageSize: 'A5',
+  pageStyle: 'lined',
+  pageCount: 1,
+  orientation: 'portrait',
+  tool: 'pen',
+  penSize: 2.5,
+  penColor: '#1f2937',
+  hlSize: 14,
+  hlColor: '#ffd43b',
 };
 
-const DEFAULT_SETTINGS = { pageSize: 'A5', pageStyle: 'lined', penSize: 2.5, penColor: '#1f2937' };
+const HOLD_MS = 500; // keep the pen still this long at a stroke's end to snap it to a shape
+const HOLD_RADIUS = { pen: 6, mouse: 5, touch: 10 }; // screen px of jitter that still counts as "still"
+const ERASER_RADIUS = 10; // screen px, for the stylus button / eraser end
+const PALM_WINDOW_MS = 500; // touches this soon after pen activity are a resting hand
+const PALM_SIZE = 60; // touch contact (CSS px) this big is a palm, not a fingertip
+const HIGHLIGHTER_OPACITY = 40;
+const TAP_MOVE_TOLERANCE = 10;
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_DIST = 40;
+const TWO_FINGER_TAP_MS = 300;
+const DELETED_RETENTION_MS = 14 * 24 * 3600 * 1000; // erased strokes are kept this long so offline devices sync the erase
+// Excalidraw's dark theme renders the scene through this filter; the live
+// preview (and colour swatches) use it too, so ink looks the same while
+// being drawn as after.
+const DARK_INK_FILTER = 'invert(93%) hue-rotate(180deg)';
 
-const CELL_SIZE = 28; // base spacing (scene px, at zoom 1) for both lined and squared patterns
-
-// Excalidraw's own freedraw renderer computes perfect-freehand's `size` as
-// strokeWidth * 4.25 (confirmed by reading its source). Without accounting
-// for that, a stroke that looks right in our live preview renders ~4.25x
-// thicker the instant it's committed to the scene.
-const EXCALIDRAW_FREEDRAW_SIZE_FACTOR = 4.25;
-
-// Double-tap-to-fit thresholds (screen px / ms) for a lone finger.
-const TAP_MOVE_TOLERANCE = 10; // max movement for a touch to still count as a "tap" rather than a drag
-const DOUBLE_TAP_MS = 350; // max gap between the two taps
-const DOUBLE_TAP_DIST = 40; // max distance between the two taps' positions
-
-const PEN_SIZES = [
-  { size: 1, dot: 5 },
-  { size: 2.5, dot: 8 },
-  { size: 5, dot: 12 },
-  { size: 9, dot: 16 },
-];
-
-const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00'];
+const UI_OPTIONS = {
+  canvasActions: {
+    changeViewBackgroundColor: false,
+    loadScene: false,
+    saveToActiveFile: false,
+    toggleTheme: false,
+    export: false,
+    saveAsImage: true,
+    clearCanvas: true,
+  },
+};
 
 // Icons for the custom selection tool button portaled into Excalidraw's own
-// toolbar (see renderSelectionToolButton) — a dashed rectangle/blob to read
-// as "marquee"/"lasso" at a glance, matching the outline style Excalidraw's
-// own tool icons use (currentColor stroke, no fill).
+// toolbar (dashed marquee / dashed lasso, matching Excalidraw's outline icons).
 const RectSelectIcon = (
   <svg viewBox="0 0 20 20" width={20} height={20} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="3.5" y="5" width="13" height="10" rx="1" strokeDasharray="2.5 2.5" />
@@ -65,377 +95,1074 @@ const ChevronDownIcon = (
   </svg>
 );
 
-// Draws the ruled/squared pattern directly with the Canvas 2D API instead
-// of a CSS repeating-gradient background-image scaled via background-size
-// (see the note on resizePatternCanvas below for why this canvas is sized to
-// the *container*, not the page, which is what makes this cheap to redraw on
-// every pan/zoom frame). Both should scale identically in theory, but a
-// CSS-gradient-based pattern gave repeated real-device reports of lines
-// shifting/multiplying while zooming that couldn't be reproduced or
-// root-caused across several rounds of testing (measuring computed
-// background-size against page size showed mathematically exact scaling
-// every time, on every zoom path tried) — so rather than keep chasing a
-// hypothetical browser-specific rendering quirk, this removes the whole
-// class of uncertainty: every line is drawn at an explicit, computed pixel
-// position, with no scaling/interpolation step for the renderer to get
-// wrong. `pageLeft/pageTop/pageWidth/pageHeight` are in the canvas's own
-// (container-relative) coordinates, i.e. the page's on-screen rect.
-function redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, cellPx, pageStyle) {
-  const dpr = window.devicePixelRatio || 1;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
-  if (pageStyle === 'empty' || cellPx <= 0) return;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(pageLeft, pageTop, pageWidth, pageHeight);
-  ctx.clip();
-  ctx.strokeStyle = pageStyle === 'squared' ? '#e2e8f0' : '#d6e4f0';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let y = cellPx; y < pageHeight; y += cellPx) {
-    const py = Math.round(pageTop + y) + 0.5;
-    ctx.moveTo(pageLeft, py);
-    ctx.lineTo(pageLeft + pageWidth, py);
+const viewKey = (id) => `quarc_notes_view_${id}`;
+
+function readStoredView(id) {
+  try {
+    const v = JSON.parse(localStorage.getItem(viewKey(id)) || 'null');
+    return v && [v.scrollX, v.scrollY, v.zoom].every(Number.isFinite) && v.zoom > 0 ? v : null;
+  } catch {
+    return null;
   }
-  if (pageStyle === 'squared') {
-    for (let x = cellPx; x < pageWidth; x += cellPx) {
-      const px = Math.round(pageLeft + x) + 0.5;
-      ctx.moveTo(px, pageTop);
-      ctx.lineTo(px, pageTop + pageHeight);
-    }
-  }
-  ctx.stroke();
-  ctx.restore();
 }
 
-// Standard ray-casting point-in-polygon test.
-function pointInPolygon(x, y, polygon) {
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i].x;
-    const yi = polygon[i].y;
-    const xj = polygon[j].x;
-    const yj = polygon[j].y;
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
+function isEraserButton(e) {
+  return e.pointerType === 'pen' && ((e.buttons & 32) !== 0 || (e.buttons & 2) !== 0 || e.button === 5 || e.button === 2);
 }
 
-// Standard 2D segment-segment intersection. Returns the intersection point
-// plus how far along p1->p2 it falls (t, 0..1), or null if the segments
-// don't cross.
-function segmentIntersection(p1, p2, p3, p4) {
-  const d1x = p2.x - p1.x;
-  const d1y = p2.y - p1.y;
-  const d2x = p4.x - p3.x;
-  const d2y = p4.y - p3.y;
-  const denom = d1x * d2y - d1y * d2x;
-  if (Math.abs(denom) < 1e-9) return null; // parallel (or degenerate)
-  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
-  const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
-  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-  return { t, x: p1.x + t * d1x, y: p1.y + t * d1y };
-}
-
-// Literally cuts a polyline (a freedraw stroke's points, or another
-// element's outline — see getCuttableOutline — in scene coordinates, with
-// pressure) at every point it crosses the selection polygon's boundary —
-// like Microsoft Paint's selection tool cutting through whatever pixels it
-// encloses, rather than treating each stroke as an atomic all-or-nothing
-// object. Walks every segment and finds every polygon-edge crossing along
-// it (sorted by how far along it they fall, so a segment that weaves
-// through a concave lasso boundary more than once is still handled
-// correctly), splitting the stroke there with a linearly-interpolated
-// pressure. Returns the resulting inside/outside pieces as arrays of point
-// runs — each run becomes its own new freedraw element.
-//
-// Crossings are checked on EVERY segment, not only when its two endpoints
-// are already on different sides: a freedraw stroke's densely-sampled
-// points made that shortcut invisible, but a long, sparse segment — a
-// rectangle's edge, a straight two-point line — can dip into the selection
-// and back out again entirely between two same-side endpoints, and those
-// crossings would otherwise be silently skipped (confirmed: this is exactly
-// what made lines/rectangles fall through to "select whole" instead of
-// being cut).
-function clipPolylineByPolygon(points, polygon) {
-  const insideRuns = [];
-  const outsideRuns = [];
-  if (points.length === 0) return { insideRuns, outsideRuns };
-
-  let currentInside = pointInPolygon(points[0].x, points[0].y, polygon);
-  let currentRun = [points[0]];
-
-  const flush = () => {
-    if (currentRun.length > 1) (currentInside ? insideRuns : outsideRuns).push(currentRun);
-  };
-
-  for (let i = 1; i < points.length; i++) {
-    const p1 = points[i - 1];
-    const p2 = points[i];
-
-    const crossings = [];
-    for (let j = 0; j < polygon.length; j++) {
-      const a = polygon[j];
-      const b = polygon[(j + 1) % polygon.length];
-      const hit = segmentIntersection(p1, p2, a, b);
-      if (hit) crossings.push(hit);
-    }
-    crossings.sort((a, b) => a.t - b.t);
-
-    for (const c of crossings) {
-      const pressure = p1.pressure + (p2.pressure - p1.pressure) * c.t;
-      const boundaryPoint = { x: c.x, y: c.y, pressure };
-      currentRun.push(boundaryPoint);
-      flush();
-      currentInside = !currentInside;
-      currentRun = [boundaryPoint];
-    }
-    currentRun.push(p2);
-    // Trust a fresh test on p2 over the crossing-count parity, so a rare
-    // numerical edge case in the crossing search can't compound across the
-    // rest of the stroke.
-    currentInside = pointInPolygon(p2.x, p2.y, polygon);
-  }
-  flush();
-
-  return { insideRuns, outsideRuns };
-}
-
-// For elements with no cuttable outline (text, images, frames, ...), this
-// decides whether the selection area touches the element's bounding box at
-// all — checked three ways: either shape's corners inside the other shape,
-// or any of their edges crossing.
-function boundingBoxIntersectsPolygon(el, polygon) {
-  const minX = el.x;
-  const minY = el.y;
-  const maxX = el.x + el.width;
-  const maxY = el.y + el.height;
-  const corners = [
-    { x: minX, y: minY },
-    { x: maxX, y: minY },
-    { x: maxX, y: maxY },
-    { x: minX, y: maxY },
-  ];
-  if (corners.some((c) => pointInPolygon(c.x, c.y, polygon))) return true;
-  if (polygon.some((p) => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY)) return true;
-  for (let i = 0; i < corners.length; i++) {
-    const a = corners[i];
-    const b = corners[(i + 1) % corners.length];
-    for (let j = 0; j < polygon.length; j++) {
-      if (segmentIntersection(a, b, polygon[j], polygon[(j + 1) % polygon.length])) return true;
-    }
-  }
-  return false;
-}
-
-// Rotates a point around a center by an angle in radians (Excalidraw stores
-// element rotation this way — corners/outline samples below are computed
-// axis-aligned first, then rotated to match the element's actual angle).
-function rotatePoint(p, cx, cy, angle) {
-  if (!angle) return { x: p.x, y: p.y };
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const dx = p.x - cx;
-  const dy = p.y - cy;
-  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
-}
-
-// Returns an element's outline as an absolute-coordinate point list — the
-// same shape clipPolylineByPolygon already expects for freedraw strokes —
-// so a rectangle/diamond/ellipse/line/arrow can be cut exactly like a pen
-// stroke instead of only ever being selected whole. freedraw/line/arrow are
-// already point sequences (open paths); rectangle/diamond/ellipse aren't
-// stored as points at all, so their corners (or, for the ellipse, a sampled
-// perimeter) are computed here and the loop is explicitly closed by
-// repeating the first point at the end, so a selection that clips through a
-// closed shape's edge still produces correct inside/outside arcs. Returns
-// null for element types that can't be meaningfully split into "inside"/
-// "outside" pieces (text, image, frame, ...) — those fall back to being
-// selected whole via boundingBoxIntersectsPolygon.
-function getCuttableOutline(el) {
-  if (el.type === 'freedraw') {
-    return el.points.map((p, i) => ({ x: el.x + p[0], y: el.y + p[1], pressure: el.pressures?.[i] ?? 0.5 }));
-  }
-  if (el.type === 'line' || el.type === 'arrow') {
-    return el.points.map((p) => ({ x: el.x + p[0], y: el.y + p[1], pressure: 0.5 }));
-  }
-  const cx = el.x + el.width / 2;
-  const cy = el.y + el.height / 2;
-  if (el.type === 'rectangle' || el.type === 'diamond') {
-    const corners =
-      el.type === 'diamond'
-        ? [
-            { x: cx, y: el.y },
-            { x: el.x + el.width, y: cy },
-            { x: cx, y: el.y + el.height },
-            { x: el.x, y: cy },
-          ]
-        : [
-            { x: el.x, y: el.y },
-            { x: el.x + el.width, y: el.y },
-            { x: el.x + el.width, y: el.y + el.height },
-            { x: el.x, y: el.y + el.height },
-          ];
-    return [...corners, corners[0]].map((p) => ({ ...rotatePoint(p, cx, cy, el.angle), pressure: 0.5 }));
-  }
-  if (el.type === 'ellipse') {
-    const rx = el.width / 2;
-    const ry = el.height / 2;
-    const SEGMENTS = 64;
-    const points = [];
-    for (let i = 0; i <= SEGMENTS; i++) {
-      const theta = (i / SEGMENTS) * Math.PI * 2;
-      const p = { x: cx + rx * Math.cos(theta), y: cy + ry * Math.sin(theta) };
-      points.push({ ...rotatePoint(p, cx, cy, el.angle), pressure: 0.5 });
-    }
-    return points;
-  }
-  return null;
+function pruneDeleted(elements) {
+  const cutoff = Date.now() - DELETED_RETENTION_MS;
+  return elements.filter((el) => !el.isDeleted || (el.updated || 0) > cutoff);
 }
 
 export default function CanvasPage({ page, onChange, onSettingsChange }) {
-  const { t } = useTranslation();
-  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ...(page.canvas_settings || {}) });
-  const [showSettings, setShowSettings] = useState(false);
-  const [showPenOptions, setShowPenOptions] = useState(false);
-  // Mirrors Excalidraw's own active tool. Our reliable pressure-capture path
-  // only takes over pen input while Excalidraw's own "freedraw" tool is
-  // selected — for every other tool (select/shapes/text/eraser), pen input
-  // passes straight through to Excalidraw's native handling untouched. This
-  // is what makes the eraser (and select/move) work correctly with a stylus.
-  const [activeToolType, setActiveToolType] = useState('freedraw');
-  // Pen size/color persist per-page (in canvas_settings, alongside page size
-  // and style) so reopening a page picks up the last pen you used on it.
-  const [penSize, setPenSizeState] = useState(settings.penSize);
-  const [penColor, setPenColorState] = useState(settings.penColor);
-  // Custom MS-Paint-style selection: 'rect' (dashed marquee) or 'freeform'
-  // (dashed lasso loop), or null when neither is active. While one is
-  // active, Excalidraw's own tool is forced to "selection" (so the group
-  // box/resize handles/drag-together UI it draws for whatever ends up
-  // selected work normally), and we capture the drag ourselves to draw the
-  // selection region and — unlike Excalidraw's native marquee, which
-  // selects whole elements only — literally cut any freedraw stroke that's
-  // only partially inside it (see finalizeSelection).
-  const [selectionTool, setSelectionTool] = useState(null);
-  // Which sub-tool the combined selection button shows/activates: remembers
-  // the last one picked from its flyout, same as MS Paint's own selection
-  // button remembering rectangle vs. free-form between uses.
-  const [selectionVariant, setSelectionVariant] = useState('rect');
-  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
-  // The DOM node of Excalidraw's own native toolbar island (".App-toolbar"),
-  // found post-mount so our selection button can be portaled to render as a
-  // literal child of it — appearing as part of Excalidraw's real toolbar
-  // pill instead of a separate custom bar (see the effect below and
-  // renderSelectionToolButton).
-  const [toolbarPortalEl, setToolbarPortalEl] = useState(null);
-  const excalidrawAPIRef = useRef(null);
-  const containerRef = useRef(null);
-  const resizeObserverRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const pageRef = useRef(null);
-  const patternCanvasRef = useRef(null);
-  const drawing = useRef(null); // { pointerId, points: [{x,y,clientX,clientY,pressure}], color, size }
-  const selectionDrawing = useRef(null); // { pointerId, mode: 'rect'|'freeform', points: [{x,y,clientX,clientY}] }
-  const touchPoints = useRef(new Map()); // pointerId -> {x, y}, all currently-active touches
-  const touchTrack = useRef(null); // { pointerId, startClientX, startClientY } — tracks a lone finger for tap detection
-  const pinchTrack = useRef(null); // { startDist, startMidX, startMidY, startZoom, startScrollX, startScrollY }
-  const pinchRAF = useRef(null); // requestAnimationFrame handle, coalesces pinch updates to once per frame
-  const lastTap = useRef(null); // { time, x, y } — for double-tap-to-fit detection
-  const saveTimer = useRef(null);
+  const { t, i18n } = useTranslation();
+  const isDark = useSettings((s) => s.isDark);
+  const paperFollowsTheme = useSettings((s) => s.paperFollowsTheme);
+  const fingerMode = useSettings((s) => s.fingerMode);
+  const penSeen = useSettings((s) => s.penSeen);
+  const shapeSnap = useSettings((s) => s.shapeSnap);
+  const updatePrefs = useSettings((s) => s.update);
+  const paperDark = isDark && paperFollowsTheme;
+  const fingerDraws = fingerMode === 'draw' || (fingerMode === 'auto' && !penSeen);
 
-  // Renders the page as an actual finite sheet — sized and positioned in
-  // scene coordinates and synced to Excalidraw's own scroll/zoom (via
-  // onScrollChange below) — instead of a pattern that fills the whole
-  // viewport and tiles infinitely as you pan. The page's own top-left is
-  // pinned to scene (0,0), so its on-screen rect is exactly
-  // `(scrollX*zoom, scrollY*zoom)` to `((scrollX+width)*zoom, (scrollY+height)*zoom)`
-  // — the same screen-coordinate formula Excalidraw itself uses internally.
-  // Written straight to the DOM (not React state) since this can fire on
-  // every frame of a pan/zoom gesture.
-  function syncPage(scrollX, scrollY, zoomValue, pageSize = settings.pageSize, pageStyle = settings.pageStyle) {
-    const el = pageRef.current;
-    const canvas = patternCanvasRef.current;
-    if (!el) return;
-    const dims = PAGE_SIZES[pageSize] || PAGE_SIZES.A5;
-    const pageLeft = scrollX * zoomValue;
-    const pageTop = scrollY * zoomValue;
-    const pageWidth = dims.width * zoomValue;
-    const pageHeight = dims.height * zoomValue;
-    el.style.left = `${pageLeft}px`;
-    el.style.top = `${pageTop}px`;
-    el.style.width = `${pageWidth}px`;
-    el.style.height = `${pageHeight}px`;
-    // The pattern canvas is sized to the *container* (see resizePatternCanvas),
-    // not the page, so this is a cheap clear-and-redraw of a few dozen lines —
-    // never a canvas.width/height reallocation, which is what was making
-    // continuous pinch/pan gestures janky (resizing a canvas's backing store
-    // on every pointermove, at page dimensions that can reach several
-    // thousand px at high zoom, is drastically more expensive than redrawing
-    // within a fixed-size buffer).
-    if (canvas) redrawPatternCanvas(canvas, pageLeft, pageTop, pageWidth, pageHeight, CELL_SIZE * zoomValue, pageStyle);
-  }
-
-  function handleScrollChange(scrollX, scrollY, zoom) {
-    syncPage(scrollX, scrollY, zoom.value);
-  }
-
-  const initialData = useMemo(() => {
+  const initial = useMemo(() => {
     const raw = page.ink_json;
-    if (isLegacyInkFormat(raw)) {
-      const converted = convertLegacyInk(raw);
-      // Persist the converted format immediately so we don't reconvert (and
-      // don't lose it) on the next load.
-      onChange(converted);
-      return {
-        ...converted,
-        appState: { scrollX: 40, scrollY: 40, zoom: { value: 1 }, ...converted.appState, activeTool: { type: 'freedraw' } },
-      };
-    }
-    return {
-      elements: raw?.elements || [],
-      // Setting activeTool (and the initial scroll/zoom) here — applied
-      // through Excalidraw's own initial state restore — is what actually
-      // makes them stick reliably. An imperative setActiveTool()/
-      // updateScene() call after mount races against Excalidraw's own
-      // post-mount setup: confirmed empirically that a post-mount
-      // updateScene({appState:{scrollX,scrollY,zoom}}) call is silently
-      // reverted (getAppState() still reports the pre-call values seconds
-      // later), the same way an imperative setActiveTool() call used to be
-      // unreliable for the default tool.
-      appState: {
-        viewBackgroundColor: 'transparent',
-        scrollX: 40,
-        scrollY: 40,
-        zoom: { value: 1 },
-        ...(raw?.appState || {}),
-        activeTool: { type: 'freedraw' },
-      },
-    };
+    const legacy = isLegacyInkFormat(raw);
+    const scene = legacy ? convertLegacyInk(raw) : raw || {};
+    return { elements: scene.elements || [], files: scene.files || {}, legacy };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page.id]);
 
-  function scheduleSave() {
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      const api = excalidrawAPIRef.current;
-      if (!api) return;
-      onChange({
-        elements: api.getSceneElementsIncludingDeleted(),
-        appState: { viewBackgroundColor: api.getAppState().viewBackgroundColor },
-      });
-    }, 500);
+  const [settings, setSettings] = useState(() => {
+    const s = { ...DEFAULT_SETTINGS, ...(page.canvas_settings || {}) };
+    // Strokes below the last sheet (e.g. from before multi-page notebooks)
+    // must stay reachable.
+    s.pageCount = Math.max(s.pageCount || 1, sheetsNeeded(initial.elements, sheetDims(s)));
+    return s;
+  });
+  const [activeToolType, setActiveToolType] = useState('freedraw');
+  const [currentSheet, setCurrentSheet] = useState(0);
+  const [pageMenuOpen, setPageMenuOpen] = useState(false);
+  const [selectionTool, setSelectionTool] = useState(null);
+  const [selectionVariant, setSelectionVariant] = useState('rect');
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  const [toolbarPortalEl, setToolbarPortalEl] = useState(null);
+
+  const apiRef = useRef(null);
+  const containerRef = useRef(null);
+  const paperRef = useRef(null);
+  const overlayRef = useRef(null);
+  const addPageBtnRef = useRef(null);
+  const pageMenuBtnRef = useRef(null);
+  const sizeRef = useRef({ width: 0, height: 0 });
+  const gestureRect = useRef(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const prefsRef = useRef({});
+  prefsRef.current = { fingerDraws, shapeSnap, paperDark };
+  const currentSheetRef = useRef(0);
+
+  const drawing = useRef(null); // pen/mouse/finger stroke in progress
+  const erasing = useRef(null); // stylus-button erase in progress
+  const eraserCursor = useRef(null);
+  const selectionDrawing = useRef(null);
+  const touchPoints = useRef(new Map());
+  const ignoredTouches = useRef(new Set()); // palms
+  const touchPan = useRef(null);
+  const touchTrack = useRef(null);
+  const pinchTrack = useRef(null);
+  const pinchRAF = useRef(null);
+  const twoFingerTap = useRef(null);
+  const lastTap = useRef(null);
+  const lastPenActivity = useRef(0);
+  const inertiaRAF = useRef(null);
+  const overlayRAF = useRef(null);
+  const initialViewRAF = useRef(null);
+
+  const saveTimer = useRef(null);
+  const viewSaveTimer = useRef(null);
+  const savedVersion = useRef(null);
+  const lastSavedJson = useRef(null);
+  const contentBase = useRef(page.server_updated_at ?? null);
+
+  const isDrawTool = activeToolType === 'freedraw';
+  const isDrawToolRef = useRef(isDrawTool);
+  isDrawToolRef.current = isDrawTool;
+
+  // ---------- view (scroll/zoom) + paper ----------
+
+  function currentView() {
+    const st = apiRef.current?.getAppState();
+    return st ? { scrollX: st.scrollX, scrollY: st.scrollY, zoom: st.zoom.value } : null;
   }
 
-  function handleExcalidrawChange(_elements, appState) {
-    if (appState?.activeTool?.type) setActiveToolType(appState.activeTool.type);
+  function syncPaper(view = currentView()) {
+    const rect = sizeRef.current;
+    if (!view || !rect.width || !paperRef.current) return;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    drawPaper(paperRef.current, view, rect, dims, s.pageCount, s.pageStyle, paperColors(prefsRef.current.paperDark));
+
+    // "Add page" button under the last sheet.
+    const btn = addPageBtnRef.current;
+    if (btn) {
+      const top = (docHeight(s.pageCount, dims) + view.scrollY) * view.zoom + 14;
+      const centerX = (dims.width / 2 + view.scrollX) * view.zoom;
+      const visible = top < rect.height - 130 && top > -40;
+      btn.style.transform = `translate(${Math.round(centerX - btn.offsetWidth / 2)}px, ${Math.round(top)}px)`;
+      btn.style.visibility = visible ? 'visible' : 'hidden';
+    }
+
+    const centerSceneY = rect.height / 2 / view.zoom - view.scrollY;
+    const sheet = sheetAt(centerSceneY, s.pageCount, dims);
+    if (sheet !== currentSheetRef.current) {
+      currentSheetRef.current = sheet;
+      setCurrentSheet(sheet);
+    }
+
+    clearTimeout(viewSaveTimer.current);
+    viewSaveTimer.current = setTimeout(() => {
+      try {
+        localStorage.setItem(viewKey(page.id), JSON.stringify(view));
+      } catch {
+        /* storage full/unavailable: only the remembered position is lost */
+      }
+    }, 400);
+  }
+
+  function applyView(view) {
+    apiRef.current?.updateScene({ appState: { scrollX: view.scrollX, scrollY: view.scrollY, zoom: { value: view.zoom } } });
+    syncPaper(view);
+  }
+
+  // Clamps any view change (wheel, Excalidraw's zoom buttons, hand tool) to
+  // the notebook: no zooming out past one whole sheet, no losing the paper.
+  function handleScrollChange(scrollX, scrollY, zoom) {
+    const rect = sizeRef.current;
+    const api = apiRef.current;
+    if (!api || !rect.width) return;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const z = Math.min(Math.max(zoom.value, fitPageZoom(rect, dims)), MAX_ZOOM);
+    const c = clampView(scrollX, scrollY, z, rect, dims, s.pageCount);
+    if (z !== zoom.value || Math.abs(c.scrollX - scrollX) > 0.01 || Math.abs(c.scrollY - scrollY) > 0.01) {
+      api.updateScene({ appState: { scrollX: c.scrollX, scrollY: c.scrollY, zoom: { value: z } } });
+    }
+    syncPaper({ ...c, zoom: z });
+  }
+
+  function resyncView() {
+    const v = currentView();
+    if (v) handleScrollChange(v.scrollX, v.scrollY, { value: v.zoom });
+  }
+
+  function initialView() {
+    const rect = sizeRef.current;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const fit = fitPageZoom(rect, dims);
+    const stored = readStoredView(page.id);
+    if (stored) {
+      const z = Math.min(Math.max(stored.zoom, fit), MAX_ZOOM);
+      return { zoom: z, ...clampView(stored.scrollX, stored.scrollY, z, rect, dims, s.pageCount) };
+    }
+    return viewForSheet(0, fit, rect, dims, s.pageCount);
+  }
+
+  function resizeCanvases() {
+    const el = containerRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    sizeRef.current = { width: rect.width, height: rect.height };
+    for (const canvas of [paperRef.current, overlayRef.current]) {
+      if (!canvas) continue;
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+    }
+  }
+
+  // Keep paper/overlay locked to the container through any resize
+  // (keyboard, rotation, browser chrome, sidebar).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return undefined;
+    resizeCanvases();
+    const ro = new ResizeObserver(() => {
+      resizeCanvases();
+      resyncView();
+      drawOverlay();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Open where the user left off on this device, else the first sheet fitted
+  // to the screen. Re-asserted for a short while after mount: Excalidraw
+  // applies its own initialData restore asynchronously and would otherwise
+  // revert an earlier view update (found empirically, see git history).
+  useEffect(() => {
+    const start = performance.now();
+    const tick = () => {
+      if (apiRef.current && sizeRef.current.width) applyView(initialView());
+      if (performance.now() - start < 800) initialViewRAF.current = requestAnimationFrame(tick);
+    };
+    initialViewRAF.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(initialViewRAF.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stopInitialView = () => cancelAnimationFrame(initialViewRAF.current);
+
+  // Paper colours follow the theme.
+  useEffect(() => {
+    syncPaper();
+    drawOverlay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperDark, settings.pageStyle, settings.pageSize, settings.orientation, settings.pageCount]);
+
+  // ---------- saving ----------
+
+  function saveNow() {
+    clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    const api = apiRef.current;
+    if (!api) return;
+    const all = api.getSceneElementsIncludingDeleted();
+    const version = getSceneVersion(all);
+    if (version === savedVersion.current) return;
+    savedVersion.current = version;
+    const elements = pruneDeleted(all);
+    const files = {};
+    const allFiles = api.getFiles();
+    for (const el of elements) {
+      if (el.type === 'image' && !el.isDeleted && el.fileId && allFiles[el.fileId]) files[el.fileId] = allFiles[el.fileId];
+    }
+    const ink = { elements, appState: { viewBackgroundColor: 'transparent' }, files };
+    lastSavedJson.current = JSON.stringify(ink);
+    onChange(ink, { base: contentBase.current });
+  }
+
+  function scheduleSave() {
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(saveNow, 600);
+  }
+
+  // Never lose the last strokes: save on leaving the page and when the app
+  // goes to the background (Android may kill it there).
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') saveNow();
+    };
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', saveNow);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', saveNow);
+      if (saveTimer.current) saveNow();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Changes from other devices arrive while this page is open: merge them
+  // in stroke by stroke (Excalidraw's own reconciliation — anything being
+  // drawn right now here wins), like live collaboration.
+  useEffect(
+    () =>
+      on('pages-changed', async (ids) => {
+        if (!ids.includes(page.id)) return;
+        const row = await db.pages.get(page.id);
+        const api = apiRef.current;
+        if (!row || !api || row.server_updated_at === contentBase.current) return;
+        if (row.ink_json === lastSavedJson.current) {
+          contentBase.current = row.server_updated_at;
+          return;
+        }
+        let remote;
+        try {
+          remote = JSON.parse(row.ink_json);
+        } catch {
+          return;
+        }
+        if (!Array.isArray(remote?.elements)) return;
+        if (remote.files) api.addFiles(Object.values(remote.files));
+        const merged = reconcileElements(api.getSceneElementsIncludingDeleted(), remote.elements, api.getAppState());
+        api.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER });
+        contentBase.current = row.server_updated_at;
+        savedVersion.current = getSceneVersion(remote.elements);
+        try {
+          const rs = JSON.parse(row.canvas_settings || '{}');
+          const patch = {};
+          for (const key of ['pageSize', 'pageStyle', 'orientation']) if (rs[key] && rs[key] !== settingsRef.current[key]) patch[key] = rs[key];
+          if ((rs.pageCount || 1) > settingsRef.current.pageCount) patch.pageCount = rs.pageCount;
+          if (Object.keys(patch).length) setLocalSettings(patch);
+        } catch {
+          /* ignore malformed settings */
+        }
+        scheduleSave();
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [page.id]
+  );
+
+  // ---------- settings ----------
+
+  function setLocalSettings(patch) {
+    const next = { ...settingsRef.current, ...patch };
+    settingsRef.current = next;
+    setSettings(next);
+    requestAnimationFrame(resyncView);
+    return next;
+  }
+
+  function updateSettings(patch) {
+    onSettingsChange(setLocalSettings(patch));
+  }
+
+  function selectDrawMode(mode) {
+    updateSettings({ tool: mode });
+    apiRef.current?.setActiveTool({ type: 'freedraw' });
+    setSelectionTool(null);
+  }
+
+  function changePen(patch) {
+    updateSettings({ tool: 'pen', ...(patch.color ? { penColor: patch.color } : {}), ...(patch.size ? { penSize: patch.size } : {}) });
+    apiRef.current?.setActiveTool({ type: 'freedraw' });
+  }
+
+  function changeHighlighter(patch) {
+    updateSettings({ tool: 'highlighter', ...(patch.color ? { hlColor: patch.color } : {}), ...(patch.size ? { hlSize: patch.size } : {}) });
+    apiRef.current?.setActiveTool({ type: 'freedraw' });
+  }
+
+  // ---------- pages ----------
+
+  function addPage(after = settingsRef.current.pageCount - 1) {
+    const api = apiRef.current;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const n = s.pageCount;
+    if (api && after < n - 1) {
+      // Inserting in the middle: everything on later sheets moves down one.
+      const from = sheetTop(after + 1, dims) - PAGE_GAP / 2;
+      const dy = dims.height + PAGE_GAP;
+      const elements = api
+        .getSceneElementsIncludingDeleted()
+        .map((el) => (!el.isDeleted && el.y >= from ? newElementWith(el, { y: el.y + dy }) : el));
+      api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      scheduleSave();
+    }
+    updateSettings({ pageCount: n + 1 });
+    const zoom = currentView()?.zoom ?? 1;
+    requestAnimationFrame(() => applyView(viewForSheet(after + 1, zoom, sizeRef.current, dims, n + 1)));
+  }
+
+  function deletePage(i) {
+    const api = apiRef.current;
+    if (!api) return;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const top = sheetTop(i, dims) - PAGE_GAP / 2;
+    const bottom = top + dims.height + PAGE_GAP;
+    const dy = dims.height + PAGE_GAP;
+    const all = api.getSceneElementsIncludingDeleted();
+    const onPage = all.filter((el) => !el.isDeleted && el.y + el.height / 2 >= top && el.y + el.height / 2 < bottom);
+    if (onPage.length && !window.confirm(t('canvas.deletePageConfirm', { n: i + 1 }))) return;
+    const lastSheet = s.pageCount === 1;
+    const elements = all.map((el) => {
+      if (el.isDeleted) return el;
+      const cy = el.y + el.height / 2;
+      if (cy >= top && cy < bottom) return newElementWith(el, { isDeleted: true });
+      if (!lastSheet && el.y >= bottom) return newElementWith(el, { y: el.y - dy });
+      return el;
+    });
+    api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    scheduleSave();
+    if (!lastSheet) updateSettings({ pageCount: s.pageCount - 1 });
+    requestAnimationFrame(() => goToSheet(Math.min(i, Math.max(0, s.pageCount - 2))));
+  }
+
+  function goToSheet(i) {
+    const s = settingsRef.current;
+    const n = s.pageCount;
+    const zoom = currentView()?.zoom ?? 1;
+    applyView(viewForSheet(Math.min(Math.max(i, 0), n - 1), zoom, sizeRef.current, sheetDims(s), n));
+  }
+
+  // ---------- Excalidraw wiring ----------
+
+  function handleExcalidrawAPI(api) {
+    apiRef.current = api;
+    if (initial.legacy) setTimeout(saveNow, 0); // persist the converted format once
+  }
+
+  function handleExcalidrawChange(elements, appState) {
+    const tool = appState?.activeTool?.type;
+    if (tool && tool !== activeToolType) setActiveToolType(tool);
+    if (getSceneVersion(elements) !== savedVersion.current) scheduleSave();
+  }
+
+  useEffect(() => {
+    if (savedVersion.current === null) savedVersion.current = getSceneVersion(initial.elements);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function sendShortcut(key, shift = false) {
+    const target = containerRef.current?.querySelector('.excalidraw');
+    target?.dispatchEvent(
+      new KeyboardEvent('keydown', { key, code: `Key${key.toUpperCase()}`, ctrlKey: true, metaKey: true, shiftKey: shift, bubbles: true, cancelable: true })
+    );
+  }
+  const undo = () => sendShortcut('z');
+  const redo = () => sendShortcut('z', true);
+
+  // ---------- live overlay (stroke preview, snapped shape, eraser, selection) ----------
+
+  function scheduleOverlay() {
+    if (overlayRAF.current) return;
+    overlayRAF.current = requestAnimationFrame(() => {
+      overlayRAF.current = null;
+      drawOverlay();
+    });
+  }
+
+  function drawOverlay() {
+    const canvas = overlayRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+
+    const d = drawing.current;
+    if (d) {
+      ctx.save();
+      ctx.globalAlpha = d.highlighter ? HIGHLIGHTER_OPACITY / 100 : 1;
+      if (d.shape) {
+        const pts = shapeOutline(d.shape.current);
+        ctx.strokeStyle = d.color;
+        ctx.lineWidth = inkWidth(d.size, d.highlighter ? 0.5 : avgPressure(d));
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+        ctx.stroke();
+      } else if (d.points.length) {
+        const path = strokeToPath2D(
+          d.points.map((p) => [p.x, p.y, p.pressure]),
+          { ...STROKE_OPTIONS, size: d.size, last: false }
+        );
+        ctx.fillStyle = d.color;
+        ctx.fill(path);
+      }
+      ctx.restore();
+    }
+
+    drawPendingErasure(ctx);
+    const e = eraserCursor.current;
+    if (e) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(115,115,115,0.9)';
+      ctx.fillStyle = 'rgba(115,115,115,0.12)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, ERASER_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    const sel = selectionDrawing.current;
+    if (sel && sel.points.length >= 2) {
+      const pts = sel.points;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#6965db';
+      ctx.fillStyle = 'rgba(105, 101, 219, 0.08)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (sel.mode === 'rect') {
+        const a = pts[0];
+        const b = pts[pts.length - 1];
+        ctx.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+      } else {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+      }
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ---------- strokes ----------
+
+  function localPoint(ev, rect, d) {
+    const raw = ev.pressure;
+    const pressure = d && (d.highlighter || d.pointerType !== 'pen') ? 0.5 : raw > 0 ? raw : 0.5;
+    return { x: ev.clientX - rect.left, y: ev.clientY - rect.top, pressure };
+  }
+
+  function avgPressure(d) {
+    if (!d.points.length) return 0.5;
+    const sum = d.points.reduce((acc, p) => acc + p.pressure, 0);
+    return Math.min(1, Math.max(0.05, sum / d.points.length));
+  }
+
+  function capture(e) {
+    try {
+      containerRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      /* pointer already gone */
+    }
+  }
+
+  function startStroke(e) {
+    const rect = containerRef.current.getBoundingClientRect();
+    gestureRect.current = rect;
+    const s = settingsRef.current;
+    const highlighter = s.tool === 'highlighter';
+    const d = {
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      highlighter,
+      color: highlighter ? s.hlColor : s.penColor,
+      size: highlighter ? s.hlSize : s.penSize,
+      points: [],
+      shape: null,
+      holdAnchor: null,
+      holdTimer: null,
+    };
+    d.points.push(localPoint(e, rect, d));
+    drawing.current = d;
+    capture(e);
+    scheduleOverlay();
+  }
+
+  function moveStroke(e) {
+    const d = drawing.current;
+    const rect = gestureRect.current;
+    const native = e.nativeEvent || e;
+    const events = native.getCoalescedEvents?.();
+    for (const ev of events && events.length ? events : [native]) d.points.push(localPoint(ev, rect, d));
+    const p = d.points[d.points.length - 1];
+    if (d.shape) {
+      d.shape.current = adjustShape(d.shape.base, d.shape.grab, p);
+    } else if (prefsRef.current.shapeSnap) {
+      const radius = HOLD_RADIUS[d.pointerType] ?? 6;
+      if (!d.holdAnchor || Math.hypot(p.x - d.holdAnchor.x, p.y - d.holdAnchor.y) > radius) {
+        d.holdAnchor = p;
+        clearTimeout(d.holdTimer);
+        d.holdTimer = setTimeout(() => trySnap(d), HOLD_MS);
+      }
+    }
+    scheduleOverlay();
+  }
+
+  // Pen held still at the end of a stroke: turn it into a clean shape that
+  // keeps following the pen until it's lifted.
+  function trySnap(d) {
+    if (drawing.current !== d || d.shape) return;
+    const shape = recognizeShape(d.points);
+    if (!shape) return;
+    const grab = d.points[d.points.length - 1];
+    d.shape = { base: shape, grab, current: shape };
+    try {
+      navigator.vibrate?.(12);
+    } catch {
+      /* no vibration support */
+    }
+    scheduleOverlay();
+  }
+
+  function cancelStroke() {
+    if (drawing.current) clearTimeout(drawing.current.holdTimer);
+    drawing.current = null;
+    scheduleOverlay();
+  }
+
+  function endStroke() {
+    const d = drawing.current;
+    if (!d) return;
+    clearTimeout(d.holdTimer);
+    drawing.current = null;
+    scheduleOverlay();
+    const api = apiRef.current;
+    if (!api) return;
+    const st = api.getAppState();
+    const zoom = st.zoom.value;
+    const toScene = (p) => ({ x: p.x / zoom - st.scrollX, y: p.y / zoom - st.scrollY });
+    const opacity = d.highlighter ? HIGHLIGHTER_OPACITY : 100;
+
+    let added;
+    if (d.shape) {
+      const strokeWidth = inkWidth(d.size, d.highlighter ? 0.5 : avgPressure(d)) / zoom;
+      added = shapeToElements(d.shape.current, toScene, { color: d.color, strokeWidth, opacity, zoom });
+    } else {
+      const pts = d.points.map((p) => ({ ...toScene(p), pressure: p.pressure }));
+      // A tap is a dot (the i's and full stops of handwriting).
+      if (pts.length === 1) pts.push({ ...pts[0], x: pts[0].x + 0.1 / zoom });
+      const el = strokeToFreedrawElement({
+        points: pts,
+        color: d.color,
+        size: d.size / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * zoom),
+        simulatePressure: false,
+      });
+      el.opacity = opacity;
+      el.roughness = 0;
+      added = [el];
+    }
+    const existing = api.getSceneElementsIncludingDeleted();
+    // Highlighter goes underneath the ink, like on paper.
+    const elements = d.highlighter ? [...added, ...existing] : [...existing, ...added];
+    api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     scheduleSave();
   }
 
-  // Picking any tool other than selection (pen, eraser, a shape, ...) means
-  // the user is done with the custom selection tool — leaving it on while
-  // e.g. freedraw is active would be confusing, since freedraw's own pen
-  // capture already takes priority.
+  // ---------- stylus-button eraser ----------
+  //
+  // Like Excalidraw's own eraser: strokes touched during the gesture are
+  // shown faded, and all deleted together when the pen lifts — one undo
+  // step. (Deleting them live and "committing" at the end doesn't work:
+  // Excalidraw's updateScene leaves already-applied changes out of the
+  // undo history.)
+
+  function eraseAt(p) {
+    const api = apiRef.current;
+    const er = erasing.current;
+    if (!api || !er) return;
+    const st = api.getAppState();
+    const zoom = st.zoom.value;
+    const scene = { x: p.x / zoom - st.scrollX, y: p.y / zoom - st.scrollY };
+    const radius = ERASER_RADIUS / zoom;
+    for (const el of api.getSceneElements()) {
+      if (!er.pending.has(el.id) && eraserHits(el, scene, radius)) er.pending.set(el.id, el);
+    }
+  }
+
+  function startErase(e) {
+    const rect = containerRef.current.getBoundingClientRect();
+    gestureRect.current = rect;
+    const p = localPoint(e, rect);
+    erasing.current = { pointerId: e.pointerId, last: p, pending: new Map() };
+    eraserCursor.current = p;
+    capture(e);
+    eraseAt(p);
+    scheduleOverlay();
+  }
+
+  function moveErase(e) {
+    const er = erasing.current;
+    const p = localPoint(e, gestureRect.current);
+    // Sample along the movement so fast swipes don't skip strokes.
+    const steps = Math.max(1, Math.ceil(Math.hypot(p.x - er.last.x, p.y - er.last.y) / (ERASER_RADIUS / 2)));
+    for (let i = 1; i <= steps; i++) {
+      eraseAt({ x: er.last.x + ((p.x - er.last.x) * i) / steps, y: er.last.y + ((p.y - er.last.y) * i) / steps });
+    }
+    er.last = p;
+    eraserCursor.current = p;
+    scheduleOverlay();
+  }
+
+  function endErase() {
+    const er = erasing.current;
+    erasing.current = null;
+    eraserCursor.current = null;
+    scheduleOverlay();
+    const api = apiRef.current;
+    if (!api || !er?.pending.size) return;
+    const elements = api
+      .getSceneElementsIncludingDeleted()
+      .map((el) => (er.pending.has(el.id) ? newElementWith(el, { isDeleted: true }) : el));
+    api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    scheduleSave();
+  }
+
+  // Fades the strokes an erase gesture has touched so far.
+  function drawPendingErasure(ctx) {
+    const er = erasing.current;
+    const api = apiRef.current;
+    if (!er?.pending.size || !api) return;
+    const st = api.getAppState();
+    const zoom = st.zoom.value;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.82)';
+    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const el of er.pending.values()) {
+      const outline = getCuttableOutline(el);
+      if (!outline) {
+        ctx.fillRect((el.x + st.scrollX) * zoom, (el.y + st.scrollY) * zoom, el.width * zoom, el.height * zoom);
+        continue;
+      }
+      const w = el.type === 'freedraw' ? el.strokeWidth * EXCALIDRAW_FREEDRAW_SIZE_FACTOR * 1.6 : el.strokeWidth + 2;
+      ctx.lineWidth = w * zoom + 3;
+      ctx.beginPath();
+      outline.forEach((pt, i) => {
+        const x = (pt.x + st.scrollX) * zoom;
+        const y = (pt.y + st.scrollY) * zoom;
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      if (outline.length === 1) ctx.lineTo((outline[0].x + st.scrollX) * zoom + 0.1, (outline[0].y + st.scrollY) * zoom);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---------- finger scrolling, pinch, taps ----------
+
+  function stopInertia() {
+    if (inertiaRAF.current) cancelAnimationFrame(inertiaRAF.current);
+    inertiaRAF.current = null;
+  }
+
+  function panBy(dx, dy) {
+    const v = currentView();
+    const rect = sizeRef.current;
+    if (!v || !rect.width) return false;
+    const s = settingsRef.current;
+    const c = clampView(v.scrollX + dx / v.zoom, v.scrollY + dy / v.zoom, v.zoom, rect, sheetDims(s), s.pageCount);
+    const moved = Math.abs(c.scrollX - v.scrollX) > 0.001 || Math.abs(c.scrollY - v.scrollY) > 0.001;
+    if (moved) applyView({ ...c, zoom: v.zoom });
+    return moved;
+  }
+
+  function startInertia(vx, vy) {
+    stopInertia();
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(48, now - last);
+      last = now;
+      const decay = Math.pow(0.94, dt / 16);
+      vx *= decay;
+      vy *= decay;
+      if (Math.hypot(vx, vy) < 0.03 || !panBy(vx * dt, vy * dt)) {
+        inertiaRAF.current = null;
+        return;
+      }
+      inertiaRAF.current = requestAnimationFrame(step);
+    };
+    inertiaRAF.current = requestAnimationFrame(step);
+  }
+
+  function startPinch() {
+    const v = currentView();
+    if (!v) return;
+    const [p1, p2] = [...touchPoints.current.values()];
+    pinchTrack.current = {
+      prevDist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
+      prevMidX: (p1.x + p2.x) / 2,
+      prevMidY: (p1.y + p2.y) / 2,
+      zoom: v.zoom,
+      scrollX: v.scrollX,
+      scrollY: v.scrollY,
+    };
+  }
+
+  // Incremental (frame-to-frame) pinch: a single noisy touch sample can't
+  // throw the rest of the gesture off (see git history for the details).
+  function updatePinch() {
+    const api = apiRef.current;
+    const rect = containerRef.current?.getBoundingClientRect();
+    const pin = pinchTrack.current;
+    if (!api || !rect || !rect.width || !pin) return;
+    const [p1, p2] = [...touchPoints.current.values()];
+    const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const midX = (p1.x + p2.x) / 2;
+    const midY = (p1.y + p2.y) / 2;
+    if (dist < 8 || pin.prevDist < 8) {
+      pin.prevDist = dist;
+      pin.prevMidX = midX;
+      pin.prevMidY = midY;
+      return;
+    }
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const zoom = Math.min(Math.max(pin.zoom * (dist / pin.prevDist), fitPageZoom(rect, dims)), MAX_ZOOM);
+    const anchorX = (pin.prevMidX - rect.left) / pin.zoom - pin.scrollX;
+    const anchorY = (pin.prevMidY - rect.top) / pin.zoom - pin.scrollY;
+    const c = clampView((midX - rect.left) / zoom - anchorX, (midY - rect.top) / zoom - anchorY, zoom, rect, dims, s.pageCount);
+    applyView({ ...c, zoom });
+    Object.assign(pin, { prevDist: dist, prevMidX: midX, prevMidY: midY, zoom, scrollX: c.scrollX, scrollY: c.scrollY });
+  }
+
+  // Double-tap: fit the whole sheet; on a fitted sheet, zoom to the page
+  // width around where you tapped (handy on phones in portrait).
+  function toggleFit(clientY) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    const v = currentView();
+    if (!rect || !v) return;
+    const s = settingsRef.current;
+    const dims = sheetDims(s);
+    const fitP = fitPageZoom(rect, dims);
+    const fitW = Math.min(fitWidthZoom(rect, dims), MAX_ZOOM);
+    const sceneY = (clientY - rect.top) / v.zoom - v.scrollY;
+    if (Math.abs(v.zoom - fitP) < 0.01 && fitW > fitP * 1.08) {
+      const scrollY = (clientY - rect.top) / fitW - sceneY;
+      applyView({ zoom: fitW, ...clampView(rect.width / (2 * fitW) - dims.width / 2, scrollY, fitW, rect, dims, s.pageCount) });
+    } else {
+      applyView(viewForSheet(sheetAt(sceneY, s.pageCount, dims), fitP, rect, dims, s.pageCount));
+    }
+  }
+
+  function handleTapForDoubleTap(e, track) {
+    const moved = Math.hypot(e.clientX - track.startClientX, e.clientY - track.startClientY);
+    if (moved > TAP_MOVE_TOLERANCE) {
+      lastTap.current = null;
+      return;
+    }
+    const now = Date.now();
+    const last = lastTap.current;
+    if (last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST) {
+      lastTap.current = null;
+      toggleFit(e.clientY);
+    } else {
+      lastTap.current = { time: now, x: e.clientX, y: e.clientY };
+    }
+  }
+
+  // ---------- pointer routing (capture phase, before Excalidraw) ----------
+  //
+  //  - Pen/mouse/finger strokes while the pen tool is on are drawn by us
+  //    (real pressure, hold-to-snap, highlighter). Every other tool gets
+  //    the input natively, so Excalidraw's eraser/select/shapes/text work.
+  //  - The stylus button / eraser end erases strokes, whatever the tool.
+  //  - Fingers: draw (if "finger draws" is on), else one finger scrolls the
+  //    notebook (with momentum), two fingers pinch-zoom/pan, two-finger tap
+  //    undoes, double-tap fits. Touches near pen activity or with a
+  //    palm-sized contact are a resting hand and are ignored.
+
+  function consume(e) {
+    e.stopPropagation();
+    e.preventDefault();
+  }
+
+  function handlePointerDownCapture(e) {
+    // Only the drawing surface itself: taps on any UI floating above it
+    // (Excalidraw's toolbar and menus, the page navigator, text being
+    // edited) must keep working normally with every pointer type.
+    if (!(e.target instanceof HTMLCanvasElement) && e.target !== containerRef.current) return;
+    stopInertia();
+    stopInitialView();
+    if (selectionTool) {
+      if (selectionDrawing.current) return;
+      consume(e);
+      const rect = containerRef.current.getBoundingClientRect();
+      gestureRect.current = rect;
+      selectionDrawing.current = { pointerId: e.pointerId, mode: selectionTool, points: [localPoint(e, rect)] };
+      capture(e);
+      return;
+    }
+
+    if (e.pointerType === 'pen') {
+      lastPenActivity.current = Date.now();
+      if (!useSettings.getState().penSeen) updatePrefs({ penSeen: true });
+      // A palm that landed just before the pen: undo its scroll.
+      if (touchPan.current) {
+        applyView(touchPan.current.startView);
+        touchPan.current = null;
+      }
+      if (drawing.current?.pointerType === 'touch') cancelStroke();
+      if (isEraserButton(e)) {
+        consume(e);
+        startErase(e);
+        return;
+      }
+      if (!isDrawToolRef.current) return;
+      consume(e);
+      startStroke(e);
+      return;
+    }
+
+    if (e.pointerType === 'mouse') {
+      if (!isDrawToolRef.current || e.button !== 0) return;
+      consume(e);
+      startStroke(e);
+      return;
+    }
+
+    if (e.pointerType !== 'touch') return;
+    const palm =
+      (e.width > PALM_SIZE && e.height > PALM_SIZE) ||
+      drawing.current?.pointerType === 'pen' ||
+      erasing.current ||
+      Date.now() - lastPenActivity.current < PALM_WINDOW_MS;
+    if (palm) {
+      consume(e);
+      ignoredTouches.current.add(e.pointerId);
+      return;
+    }
+
+    touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY });
+
+    if (touchPoints.current.size >= 2) {
+      // The first finger was really the start of a pinch.
+      if (drawing.current?.pointerType === 'touch') cancelStroke();
+      touchPan.current = null;
+      touchTrack.current = null;
+      consume(e);
+      startPinch();
+      twoFingerTap.current = touchPoints.current.size === 2 ? { start: Date.now(), moved: false } : null;
+      return;
+    }
+
+    if (isDrawToolRef.current) {
+      consume(e);
+      touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: true };
+      if (prefsRef.current.fingerDraws) {
+        startStroke(e);
+      } else {
+        touchPan.current = {
+          pointerId: e.pointerId,
+          lastX: e.clientX,
+          lastY: e.clientY,
+          startView: currentView(),
+          samples: [{ t: performance.now(), x: e.clientX, y: e.clientY }],
+        };
+        capture(e);
+      }
+      return;
+    }
+
+    // Other tools: only pre-empt what looks like the second tap of a
+    // double-tap, so Excalidraw's own double-tap zoom doesn't fire too.
+    const now = Date.now();
+    const last = lastTap.current;
+    const secondTap = !!last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST;
+    touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: secondTap };
+    if (secondTap) consume(e);
+  }
+
+  function handlePointerMoveCapture(e) {
+    if (e.pointerType === 'pen') lastPenActivity.current = Date.now();
+    if (ignoredTouches.current.has(e.pointerId)) {
+      consume(e);
+      return;
+    }
+    const sel = selectionDrawing.current;
+    if (sel && e.pointerId === sel.pointerId) {
+      consume(e);
+      sel.points.push(localPoint(e, gestureRect.current));
+      scheduleOverlay();
+      return;
+    }
+    if (drawing.current && e.pointerId === drawing.current.pointerId) {
+      consume(e);
+      moveStroke(e);
+      return;
+    }
+    if (erasing.current && e.pointerId === erasing.current.pointerId) {
+      consume(e);
+      moveErase(e);
+      return;
+    }
+    if (!touchPoints.current.has(e.pointerId)) return;
+
+    const tp = touchPoints.current.get(e.pointerId);
+    tp.x = e.clientX;
+    tp.y = e.clientY;
+
+    if (touchPoints.current.size >= 2 && pinchTrack.current) {
+      consume(e);
+      if (twoFingerTap.current && Math.hypot(tp.x - tp.startX, tp.y - tp.startY) > 12) twoFingerTap.current.moved = true;
+      if (!pinchRAF.current) {
+        pinchRAF.current = requestAnimationFrame(() => {
+          pinchRAF.current = null;
+          if (touchPoints.current.size >= 2 && pinchTrack.current) updatePinch();
+        });
+      }
+      return;
+    }
+
+    const pan = touchPan.current;
+    if (pan && pan.pointerId === e.pointerId) {
+      consume(e);
+      // Content follows the finger.
+      panBy(e.clientX - pan.lastX, e.clientY - pan.lastY);
+      pan.lastX = e.clientX;
+      pan.lastY = e.clientY;
+      const now = performance.now();
+      pan.samples.push({ t: now, x: e.clientX, y: e.clientY });
+      while (pan.samples.length > 2 && now - pan.samples[0].t > 100) pan.samples.shift();
+      return;
+    }
+
+    if (touchTrack.current?.pointerId === e.pointerId && touchTrack.current.consumed) consume(e);
+  }
+
+  function handlePointerUpCapture(e) {
+    if (ignoredTouches.current.delete(e.pointerId)) {
+      consume(e);
+      return;
+    }
+    const sel = selectionDrawing.current;
+    if (sel && e.pointerId === sel.pointerId) {
+      consume(e);
+      finalizeSelection();
+      return;
+    }
+    if (drawing.current && e.pointerId === drawing.current.pointerId) {
+      consume(e);
+      if (e.type === 'pointercancel') cancelStroke();
+      else endStroke();
+      if (e.pointerType === 'touch') {
+        touchPoints.current.delete(e.pointerId);
+        touchTrack.current = null;
+      }
+      return;
+    }
+    if (erasing.current && e.pointerId === erasing.current.pointerId) {
+      consume(e);
+      endErase();
+      return;
+    }
+    if (!touchPoints.current.has(e.pointerId)) return;
+
+    const wasPinching = touchPoints.current.size >= 2 && !!pinchTrack.current;
+    const track = touchTrack.current?.pointerId === e.pointerId ? touchTrack.current : null;
+    const pan = touchPan.current?.pointerId === e.pointerId ? touchPan.current : null;
+    touchPoints.current.delete(e.pointerId);
+
+    if (touchPoints.current.size < 2) {
+      pinchTrack.current = null;
+      if (pinchRAF.current) cancelAnimationFrame(pinchRAF.current);
+      pinchRAF.current = null;
+    }
+    const tap = twoFingerTap.current;
+    if (tap && touchPoints.current.size === 0) {
+      twoFingerTap.current = null;
+      if (!tap.moved && Date.now() - tap.start < TWO_FINGER_TAP_MS) undo();
+    }
+
+    if (pan) {
+      touchPan.current = null;
+      consume(e);
+      const samples = pan.samples;
+      if (samples.length >= 2) {
+        const a = samples[0];
+        const b = samples[samples.length - 1];
+        const dt = b.t - a.t;
+        if (dt > 0 && performance.now() - b.t < 60) startInertia((b.x - a.x) / dt, (b.y - a.y) / dt);
+      }
+    }
+    if (track) {
+      touchTrack.current = null;
+      if (track.consumed) consume(e);
+      handleTapForDoubleTap(e, track);
+      return;
+    }
+    if (wasPinching) consume(e);
+  }
+
+  // ---------- MS-Paint-style cut selection ----------
+
   useEffect(() => {
     if (activeToolType !== 'selection') setSelectionTool(null);
   }, [activeToolType]);
@@ -443,27 +1170,20 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   function selectTool(mode) {
     setSelectionTool((prev) => {
       const next = prev === mode ? null : mode;
-      if (next) excalidrawAPIRef.current?.setActiveTool({ type: 'selection' });
+      if (next) apiRef.current?.setActiveTool({ type: 'selection' });
       return next;
     });
   }
 
-  // Picking a variant from the selection tool's flyout always activates it
-  // (never toggles it off) — picking "Rectangle"/"Free-form" from a menu
-  // reads as choosing a tool, not toggling one, and also remembers the
-  // choice as the default the main button shows/activates next time.
   function chooseSelectionVariant(mode) {
     setSelectionVariant(mode);
     setSelectionMenuOpen(false);
     setSelectionTool(mode);
-    excalidrawAPIRef.current?.setActiveTool({ type: 'selection' });
+    apiRef.current?.setActiveTool({ type: 'selection' });
   }
 
-  // Closes the flyout on any interaction outside it — it floats directly
-  // over the canvas/toolbar, so leaving it open until the caret is clicked
-  // again would be an easy way to accidentally block the page underneath.
   useEffect(() => {
-    if (!selectionMenuOpen) return;
+    if (!selectionMenuOpen) return undefined;
     const handleOutside = (e) => {
       if (!e.target.closest?.('.quarc-selection-tool')) setSelectionMenuOpen(false);
     };
@@ -471,63 +1191,10 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     return () => document.removeEventListener('pointerdown', handleOutside, true);
   }, [selectionMenuOpen]);
 
-  function handleExcalidrawAPI(api) {
-    excalidrawAPIRef.current = api;
-    const appState = api.getAppState();
-    syncPage(appState.scrollX, appState.scrollY, appState.zoom.value);
-  }
-
-  // Opens every page fit-to-screen rather than at the fixed zoom=1 the
-  // declarative initialData above uses as a placeholder (initialData can't
-  // compute a real fit zoom itself — the container's size isn't known until
-  // after mount). A plain post-mount call from within handleExcalidrawAPI
-  // itself doesn't stick (confirmed earlier: Excalidraw's own post-mount
-  // setup silently reverts an appState update made from inside that ref
-  // callback's call stack) — deferring it to a rAF queued from a [page.id]
-  // effect runs it in a genuinely later task, after that setup has finished,
-  // the same way the working double-tap-to-fit handler already does.
+  // Excalidraw's tool row (".App-toolbar > .Stack_horizontal") is a real,
+  // persistent DOM node; our selection button is portaled into it so it
+  // looks and behaves like a native tool.
   useEffect(() => {
-    let cancelled = false;
-    let raf;
-    const start = performance.now();
-    // A single deferred call isn't enough: measured empirically, a call
-    // made ~1 frame after mount gets silently reverted a few frames later
-    // (Excalidraw appears to apply its own initialData-driven restore
-    // asynchronously post-mount, not just during the synchronous mount
-    // callback the earlier double-tap-to-fit finding was about) — a plain
-    // one-shot deferred call raced that and lost. Re-asserting fit-to-screen
-    // on every frame for a short window guarantees ours is the last write
-    // regardless of exactly when that internal restore resolves, without
-    // depending on a guessed delay.
-    const tick = () => {
-      if (cancelled) return;
-      fitPageToScreen();
-      if (performance.now() - start < 800) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(raf);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page.id]);
-
-  // Excalidraw's toolbar island (".App-toolbar") isn't itself the flex row
-  // the tool icons sit in — that's its child ".Stack_horizontal" (confirmed
-  // by inspecting the actual rendered DOM: Island > HintViewer + a hidden
-  // heading + one "Stack Stack_horizontal" div holding lock/hand/selection/
-  // rectangle/.../eraser/extra-tools in a row). Targeting the Island itself
-  // portaled our button onto its own line below the icons instead of beside
-  // them, since Island doesn't apply flex — this is a real, persistent DOM
-  // node for as long as the page is mounted, not something the public API
-  // exposes a child-slot for, so it's located directly and our own button is
-  // portaled into it (see renderSelectionToolButton). Polls across animation
-  // frames instead of assuming it exists on the first one, since it's
-  // rendered by Excalidraw's own mount, not ours. Re-runs on page navigation
-  // because Excalidraw remounts (key={page.id} below) and the old node goes
-  // away.
-  useEffect(() => {
-    setToolbarPortalEl(null);
     let cancelled = false;
     let raf;
     const poll = () => {
@@ -541,495 +1208,19 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [page.id]);
+  }, []);
 
-  function updateSettings(patch) {
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    onSettingsChange(next);
-    const api = excalidrawAPIRef.current;
-    if (api) {
-      const appState = api.getAppState();
-      syncPage(appState.scrollX, appState.scrollY, appState.zoom.value, next.pageSize, next.pageStyle);
-    }
-  }
-
-  function setPenSize(size) {
-    setPenSizeState(size);
-    updateSettings({ penSize: size });
-  }
-
-  function setPenColor(color) {
-    setPenColorState(color);
-    updateSettings({ penColor: color });
-  }
-
-  function resizeOverlay() {
-    const canvas = overlayCanvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = container.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
-    canvas.getContext('2d').scale(dpr, dpr);
-  }
-
-  // Sized to the container (like the overlay above), not to the page —
-  // this only needs reallocating when the container itself actually
-  // resizes, never on every pan/zoom frame. That's the whole point: a
-  // canvas.width/height reassignment fully clears and reallocates its
-  // backing store, which at page dimensions reaching several thousand px
-  // at high zoom is expensive enough to visibly stutter a continuous pinch
-  // gesture if done on every pointermove. Redrawing within an
-  // already-sized buffer (see redrawPatternCanvas) is just a clear + a few
-  // dozen line draws, regardless of zoom level.
-  function resizePatternCanvas() {
-    const canvas = patternCanvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = container.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
-    canvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  function redrawOverlay() {
-    const canvas = overlayCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
-    if (drawing.current && drawing.current.points.length >= 2) {
-      const path = strokeToPath2D(
-        drawing.current.points.map((p) => [p.x, p.y, p.pressure]),
-        { ...STROKE_OPTIONS, size: drawing.current.size }
-      );
-      ctx.fillStyle = drawing.current.color;
-      ctx.fill(path);
-      return;
-    }
-    if (selectionDrawing.current && selectionDrawing.current.points.length >= 2) {
-      const sel = selectionDrawing.current;
-      const pts = sel.points;
-      ctx.save();
-      ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = '#6965db';
-      ctx.fillStyle = 'rgba(105, 101, 219, 0.08)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      if (sel.mode === 'rect') {
-        const p0 = pts[0];
-        const p1 = pts[pts.length - 1];
-        const x = Math.min(p0.x, p1.x);
-        const y = Math.min(p0.y, p1.y);
-        ctx.rect(x, y, Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y));
-      } else {
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.closePath();
-      }
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  // The page/lines overlay is only ever resynced in response to Excalidraw's
-  // own onScrollChange — but the *container* can also resize on its own
-  // (mobile browser chrome hiding/showing as you start interacting with the
-  // page, on-screen keyboard, orientation change), independent of any
-  // scroll/zoom change. Without this, the page/lines div can end up sized
-  // for a stale container rect while Excalidraw's own canvas has already
-  // resized to the new one, so they drift apart — this is what watches for
-  // that and keeps them locked together no matter what caused the resize.
-  function containerRefCallback(el) {
-    containerRef.current = el;
-    if (resizeObserverRef.current) {
-      resizeObserverRef.current.disconnect();
-      resizeObserverRef.current = null;
-    }
-    if (!el) return;
-    requestAnimationFrame(() => {
-      resizeOverlay();
-      resizePatternCanvas();
-      resyncPageToCurrentState();
-    });
-    resizeObserverRef.current = new ResizeObserver(() => {
-      resizeOverlay();
-      resizePatternCanvas();
-      resyncPageToCurrentState();
-    });
-    resizeObserverRef.current.observe(el);
-  }
-
-  function resyncPageToCurrentState() {
-    const api = excalidrawAPIRef.current;
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!api || !rect || !rect.width || !rect.height) return;
-    const appState = api.getAppState();
-    const { scrollX, scrollY } = clampScroll(appState.scrollX, appState.scrollY, appState.zoom.value, rect);
-    if (scrollX !== appState.scrollX || scrollY !== appState.scrollY) {
-      api.updateScene({ appState: { scrollX, scrollY } });
-    }
-    syncPage(scrollX, scrollY, appState.zoom.value);
-  }
-
-  function getPoint(e) {
-    const rect = containerRef.current.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-      clientX: e.clientX,
-      clientY: e.clientY,
-      pressure: e.pressure,
-    };
-  }
-
-  const isPenActive = activeToolType === 'freedraw';
-
-  // The smallest zoom we ever allow: the page fit to the current viewport.
-  // Below that you'd just be looking at gray space around a tiny page, which
-  // isn't useful — so both the double-tap-to-fit and the pinch gesture below
-  // treat this as a hard floor, not just a default.
-  const FIT_MARGIN = 48; // screen px of buffer around the page at fit zoom
-
-  function computeFitZoom(rect) {
-    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
-    return Math.min((rect.width - FIT_MARGIN) / dims.width, (rect.height - FIT_MARGIN) / dims.height);
-  }
-
-  // Keeps the page from ever being panned out of view. At exactly fit zoom
-  // there's nowhere to go — scroll is pinned to the single centered
-  // position (matching "shouldn't be able to move it at all" in fit mode).
-  // Above fit zoom, scroll is clamped so the page can never be dragged more
-  // than FIT_MARGIN screen px past either edge of the viewport, the same
-  // small buffer already visible at fit zoom.
-  function clampScroll(scrollX, scrollY, zoomValue, rect) {
-    const dims = PAGE_SIZES[settings.pageSize] || PAGE_SIZES.A5;
-    const fitZoom = computeFitZoom(rect);
-    if (zoomValue <= fitZoom + 1e-6) {
-      return {
-        scrollX: rect.width / (2 * fitZoom) - dims.width / 2,
-        scrollY: rect.height / (2 * fitZoom) - dims.height / 2,
-      };
-    }
-    const clampAxis = (scroll, viewportSize, pageSize) => {
-      const minScroll = (viewportSize - FIT_MARGIN) / zoomValue - pageSize;
-      const maxScroll = FIT_MARGIN / zoomValue;
-      if (minScroll > maxScroll) return viewportSize / (2 * zoomValue) - pageSize / 2; // no room to pan on this axis — stay centered
-      return Math.min(Math.max(scroll, minScroll), maxScroll);
-    };
-    return {
-      scrollX: clampAxis(scrollX, rect.width, dims.width),
-      scrollY: clampAxis(scrollY, rect.height, dims.height),
-    };
-  }
-
-  // Capture phase on the page container:
-  //  - real pen input while freedraw is active, which we turn into a
-  //    properly pressure-captured freedraw element (see finalizeStroke) —
-  //    pen input while any OTHER tool is active falls through to Excalidraw
-  //    natively, which is what gives us a working eraser/select for free.
-  //  - camera control (two-finger pinch-zoom/pan, with a hard floor at
-  //    "page fit to screen", and double-tap-to-fit) works the same
-  //    regardless of which tool is active, since navigating the page isn't
-  //    a tool-specific gesture — see updatePinch/handleTapForDoubleTap.
-  //  - a *lone* finger only gets consumed while freedraw is active (a
-  //    notebook app shouldn't draw or pan with a bare finger — only the pen
-  //    should leave ink, and a finger resting on the page, e.g. the heel of
-  //    your hand while writing, shouldn't nudge the view either). With any
-  //    other tool, a lone finger is left alone so touch keeps working
-  //    normally for that tool (eraser, select, ...) — except when it looks
-  //    like the second tap of a double-tap, which we pre-empt so
-  //    Excalidraw's own native double-tap/dblclick zoom doesn't also fire.
-  function handlePointerDownCapture(e) {
-    if (selectionTool) {
-      if (selectionDrawing.current) return; // already selecting with another pointer — ignore
-      e.stopPropagation();
-      e.preventDefault();
-      selectionDrawing.current = { pointerId: e.pointerId, mode: selectionTool, points: [getPoint(e)] };
-      return;
-    }
-    if (e.pointerType === 'pen') {
-      if (!isPenActive) return;
-      e.stopPropagation();
-      e.preventDefault();
-      drawing.current = { pointerId: e.pointerId, points: [getPoint(e)], color: penColor, size: penSize };
-      return;
-    }
-    if (e.pointerType === 'touch') {
-      touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-      if (touchPoints.current.size >= 2) {
-        // A second finger always hijacks into our own pinch/pan, no matter
-        // which tool is active — camera control isn't a tool-specific
-        // gesture. (If the first finger's own down wasn't consumed below
-        // because some other tool was active, Excalidraw may have already
-        // started its own single-finger action with it; taking over from
-        // here is an accepted rough edge for a second finger landing
-        // mid-gesture, which is rare in practice.)
-        touchTrack.current = null;
-        e.stopPropagation();
-        e.preventDefault();
-        startPinch();
-        return;
-      }
-
-      if (isPenActive) {
-        // A lone finger never draws or pans while writing — consume it
-        // entirely (see the block comment above).
-        e.stopPropagation();
-        e.preventDefault();
-        touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: true };
-        pinchTrack.current = null;
-        return;
-      }
-
-      // Any other tool: only pre-empt this touch if it looks like the
-      // second tap of a double-tap (close in time and position to the last
-      // recorded tap) — that stops Excalidraw's own native double-tap/
-      // dblclick zoom from also firing. Otherwise leave it alone so touch
-      // keeps working normally for whatever tool is active (eraser,
-      // select, ...); we still track its start position so a genuine tap
-      // (not a drag) gets recorded as the "last tap" for next time.
-      const now = Date.now();
-      const last = lastTap.current;
-      const looksLikeSecondTap = !!last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST;
-      touchTrack.current = { pointerId: e.pointerId, startClientX: e.clientX, startClientY: e.clientY, consumed: looksLikeSecondTap };
-      pinchTrack.current = null;
-      if (looksLikeSecondTap) {
-        e.stopPropagation();
-        e.preventDefault();
-      }
-    }
-  }
-
-  function startPinch() {
-    const api = excalidrawAPIRef.current;
-    const appState = api?.getAppState();
-    if (!appState) return;
-    const [p1, p2] = [...touchPoints.current.values()];
-    pinchTrack.current = {
-      prevDist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
-      prevMidX: (p1.x + p2.x) / 2,
-      prevMidY: (p1.y + p2.y) / 2,
-      zoom: appState.zoom.value,
-      scrollX: appState.scrollX,
-      scrollY: appState.scrollY,
-    };
-  }
-
-  // Incremental (frame-to-frame), not anchored to the gesture's start: each
-  // move computes a delta from the *previous* move rather than from a fixed
-  // start snapshot. Real touch input is noisy (a single jittery sample with
-  // near-identical finger positions would send an anchored-to-start version
-  // of this into a wild zoom swing) — incremental tracking means one bad
-  // frame can't throw off the rest of the gesture, since the next good
-  // frame just resumes from wherever it actually is.
-  function updatePinch() {
-    const api = excalidrawAPIRef.current;
-    const rect = containerRef.current?.getBoundingClientRect();
-    const pin = pinchTrack.current;
-    if (!api || !rect || !rect.width || !rect.height || !pin) return;
-    const [p1, p2] = [...touchPoints.current.values()];
-    const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const midX = (p1.x + p2.x) / 2;
-    const midY = (p1.y + p2.y) / 2;
-
-    // Fingers reporting (near-)identical positions for a frame would make
-    // the zoom ratio blow up or collapse — skip updating zoom/scroll this
-    // frame and just resync the reference point, so the gesture recovers
-    // cleanly on the next good frame instead of jumping.
-    if (dist < 8 || pin.prevDist < 8) {
-      pin.prevDist = dist;
-      pin.prevMidX = midX;
-      pin.prevMidY = midY;
-      return;
-    }
-
-    const fitZoom = computeFitZoom(rect);
-    const rawZoom = pin.zoom * (dist / pin.prevDist);
-    const zoomValue = Math.min(Math.max(rawZoom, fitZoom), 5);
-
-    // Anchor the scene point that was under the PREVIOUS frame's midpoint to
-    // the CURRENT midpoint — zooms around where your fingers are, and pans
-    // naturally if the midpoint itself drifts (two-finger pan).
-    const sceneAnchorX = (pin.prevMidX - rect.left) / pin.zoom - pin.scrollX;
-    const sceneAnchorY = (pin.prevMidY - rect.top) / pin.zoom - pin.scrollY;
-    const rawScrollX = (midX - rect.left) / zoomValue - sceneAnchorX;
-    const rawScrollY = (midY - rect.top) / zoomValue - sceneAnchorY;
-    const { scrollX, scrollY } = clampScroll(rawScrollX, rawScrollY, zoomValue, rect);
-
-    api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
-    syncPage(scrollX, scrollY, zoomValue);
-
-    pin.prevDist = dist;
-    pin.prevMidX = midX;
-    pin.prevMidY = midY;
-    pin.zoom = zoomValue;
-    pin.scrollX = scrollX;
-    pin.scrollY = scrollY;
-  }
-
-  function handlePointerMoveCapture(e) {
-    if (selectionDrawing.current && e.pointerId === selectionDrawing.current.pointerId) {
-      e.stopPropagation();
-      e.preventDefault();
-      selectionDrawing.current.points.push(getPoint(e));
-      redrawOverlay();
-      return;
-    }
-    if (drawing.current && e.pointerId === drawing.current.pointerId) {
-      e.stopPropagation();
-      e.preventDefault();
-      drawing.current.points.push(getPoint(e));
-      redrawOverlay();
-      return;
-    }
-    if (touchPoints.current.has(e.pointerId)) {
-      touchPoints.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-      if (touchPoints.current.size >= 2 && pinchTrack.current) {
-        e.stopPropagation();
-        e.preventDefault();
-        // Touch fires pointermove far faster than the display can paint (up
-        // to 120Hz+ on some tablets). Coalescing to one updatePinch() per
-        // animation frame — using whatever the latest finger positions are
-        // by the time that frame runs — keeps the gesture smooth without
-        // doing redundant work for intermediate samples that never even get
-        // drawn.
-        if (!pinchRAF.current) {
-          pinchRAF.current = requestAnimationFrame(() => {
-            pinchRAF.current = null;
-            if (touchPoints.current.size >= 2 && pinchTrack.current) updatePinch();
-          });
-        }
-        return;
-      }
-
-      // A lone finger: consume it only if we're the ones handling its
-      // whole lifecycle (writing mode, or it was flagged as a likely
-      // second tap at pointerdown) — otherwise this is normal single-finger
-      // use of whatever other tool is active, and shouldn't be touched.
-      if (touchTrack.current?.pointerId === e.pointerId && touchTrack.current.consumed) {
-        e.stopPropagation();
-        e.preventDefault();
-      }
-    }
-  }
-
-  function handlePointerUpCapture(e) {
-    if (selectionDrawing.current && e.pointerId === selectionDrawing.current.pointerId) {
-      e.stopPropagation();
-      e.preventDefault();
-      finalizeSelection();
-      return;
-    }
-    if (drawing.current && e.pointerId === drawing.current.pointerId) {
-      e.stopPropagation();
-      e.preventDefault();
-      finalizeStroke();
-      return;
-    }
-    if (touchPoints.current.has(e.pointerId)) {
-      const wasPinching = touchPoints.current.size >= 2 && !!pinchTrack.current;
-      const track = touchTrack.current?.pointerId === e.pointerId ? touchTrack.current : null;
-      touchPoints.current.delete(e.pointerId);
-      if (touchPoints.current.size < 2) {
-        pinchTrack.current = null;
-        if (pinchRAF.current) {
-          cancelAnimationFrame(pinchRAF.current);
-          pinchRAF.current = null;
-        }
-      }
-      if (track) {
-        touchTrack.current = null;
-        if (track.consumed) {
-          e.stopPropagation();
-          e.preventDefault();
-        }
-        // Runs regardless of consumed: a genuine tap that fell through to
-        // whatever tool is active still needs to be recorded as "last tap"
-        // so the NEXT touch can recognize itself as a possible second tap.
-        handleTapForDoubleTap(e, track);
-        return;
-      }
-      if (wasPinching) {
-        e.stopPropagation();
-        e.preventDefault();
-      }
-      // else: a lone, un-consumed touch ending — let native tool behavior see it.
-    }
-  }
-
-  // A lone finger doesn't drag the page, but a quick double-tap (two taps,
-  // close together in time and position, without much movement in between)
-  // fits the page to the screen — same gesture most notebook/PDF apps use.
-  function handleTapForDoubleTap(e, track) {
-    const moved = Math.hypot(e.clientX - track.startClientX, e.clientY - track.startClientY);
-    if (moved > TAP_MOVE_TOLERANCE) {
-      lastTap.current = null;
-      return;
-    }
-    const now = Date.now();
-    const last = lastTap.current;
-    if (last && now - last.time < DOUBLE_TAP_MS && Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_TAP_DIST) {
-      lastTap.current = null;
-      fitPageToScreen();
-    } else {
-      lastTap.current = { time: now, x: e.clientX, y: e.clientY };
-    }
-  }
-
-  function fitPageToScreen() {
-    const api = excalidrawAPIRef.current;
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!api || !rect || !rect.width || !rect.height) return;
-    const zoomValue = computeFitZoom(rect);
-    const { scrollX, scrollY } = clampScroll(0, 0, zoomValue, rect);
-    api.updateScene({ appState: { scrollX, scrollY, zoom: { value: zoomValue } } });
-    syncPage(scrollX, scrollY, zoomValue);
-  }
-
-  // MS-Paint-style selection: converts the drawn region (rectangle or
-  // freeform loop) to a scene-coordinate polygon, then — for every element
-  // with a cuttable outline (freedraw, line, arrow, rectangle, diamond,
-  // ellipse — see getCuttableOutline) only partially inside it — literally
-  // cuts that outline at the boundary via clipPolylineByPolygon, replacing
-  // it with separate "inside" (selected) and "outside" (left behind,
-  // unselected) pieces. An element entirely inside or entirely outside is
-  // left as a single piece (just selected, or just untouched) — still its
-  // original type, so an untouched/fully-selected rectangle stays resizable
-  // and keeps its fill. Elements with no sensible "inside"/"outside" split
-  // (text, images, frames, ...) are selected whole if the region touches
-  // their bounding box at all. Leaves Excalidraw's own "selection" tool to
-  // take over from there — its usual group box/resize handles/drag-
-  // together UI works on whatever ends up selected here exactly as if the
-  // user had made a native marquee selection.
+  // Cuts every stroke/shape crossing the drawn region at its boundary and
+  // selects the inside pieces as one group (see canvas/selectionCut.js).
   function finalizeSelection() {
     const sel = selectionDrawing.current;
     selectionDrawing.current = null;
-    redrawOverlay();
-    if (!sel) return;
-
-    const api = excalidrawAPIRef.current;
-    if (!api) return;
-    const appState = api.getAppState();
-    const rect = containerRef.current.getBoundingClientRect();
-    const sceneOpts = {
-      zoom: appState.zoom,
-      offsetLeft: rect.left,
-      offsetTop: rect.top,
-      scrollX: appState.scrollX,
-      scrollY: appState.scrollY,
-    };
-    const toScene = (p) => viewportCoordsToSceneCoords({ clientX: p.clientX, clientY: p.clientY }, sceneOpts);
+    scheduleOverlay();
+    const api = apiRef.current;
+    if (!sel || !api) return;
+    const st = api.getAppState();
+    const zoom = st.zoom.value;
+    const toScene = (p) => ({ x: p.x / zoom - st.scrollX, y: p.y / zoom - st.scrollY });
 
     let polygon;
     if (sel.mode === 'rect') {
@@ -1039,7 +1230,7 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       const maxX = Math.max(a.x, b.x);
       const minY = Math.min(a.y, b.y);
       const maxY = Math.max(a.y, b.y);
-      if (maxX - minX < 3 || maxY - minY < 3) return; // too small — an accidental tap, not a drag
+      if (maxX - minX < 3 || maxY - minY < 3) return;
       polygon = [
         { x: minX, y: minY },
         { x: maxX, y: minY },
@@ -1054,11 +1245,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       if (Math.max(...xs) - Math.min(...xs) < 3 || Math.max(...ys) - Math.min(...ys) < 3) return;
     }
 
-    const elements = api.getSceneElementsIncludingDeleted();
     const newElements = [];
     const selectedElementIds = {};
-
-    for (const el of elements) {
+    for (const el of api.getSceneElementsIncludingDeleted()) {
       if (el.isDeleted) {
         newElements.push(el);
         continue;
@@ -1067,119 +1256,48 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       if (outline) {
         const { insideRuns, outsideRuns } = clipPolylineByPolygon(outline, polygon);
         if (insideRuns.length === 0) {
-          newElements.push(el); // untouched — none of it is in the selection
+          newElements.push(el);
           continue;
         }
         if (outsideRuns.length === 0) {
-          // Entirely inside — keep the original element (preserves its id/
-          // history, and for shapes its fill/editability) rather than
-          // rebuilding identical geometry, just select it.
           newElements.push(el);
           selectedElementIds[el.id] = true;
           continue;
         }
-        // Partially inside: rebuild both sides as freedraw strokes along the
-        // cut outline — once a rectangle/ellipse/line/arrow has had a piece
-        // cut out of it, it's no longer a whole, resizable shape (its fill
-        // can't sensibly follow a broken outline either), so — same as a cut
-        // pen stroke — it becomes ink tracing the remaining path.
-        for (const run of outsideRuns) {
-          if (run.length < 2) continue;
-          newElements.push(
-            strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure })
-          );
-        }
+        const piece = (run) => {
+          const p = strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure });
+          p.opacity = el.opacity;
+          return p;
+        };
+        for (const run of outsideRuns) if (run.length >= 2) newElements.push(piece(run));
         for (const run of insideRuns) {
           if (run.length < 2) continue;
-          const piece = strokeToFreedrawElement({ points: run, color: el.strokeColor, size: el.strokeWidth, simulatePressure: el.simulatePressure });
-          newElements.push(piece);
-          selectedElementIds[piece.id] = true;
+          const p = piece(run);
+          newElements.push(p);
+          selectedElementIds[p.id] = true;
         }
       } else {
-        // Text, images, frames, ... can't be meaningfully split into
-        // "inside"/"outside" pieces — selected whole if the region touches
-        // them at all.
         newElements.push(el);
         if (boundingBoxIntersectsPolygon(el, polygon)) selectedElementIds[el.id] = true;
       }
     }
 
-    // Excalidraw draws a per-element highlight box for every selected
-    // element, UNLESS that element belongs to a currently-selected *group*
-    // (confirmed by reading its own interactive-canvas renderer: it skips an
-    // element's individual highlight when isSelectedViaGroup() is true, and
-    // draws exactly one dashed box for the group instead via
-    // getCommonBounds). So when a cut leaves more than one piece selected,
-    // sharing a fresh groupId across them — the same mechanism Excalidraw's
-    // own Ctrl+G uses — collapses "every separate stroke as its own window"
-    // down to the single box the user asked for, entirely through
-    // Excalidraw's native rendering (no custom overlay needed).
+    // Several selected pieces share a fresh group, so Excalidraw draws one
+    // box around them instead of one per piece.
     let finalElements = newElements;
-    const selectedIds = Object.keys(selectedElementIds);
+    const ids = Object.keys(selectedElementIds);
     const appStatePatch = { selectedElementIds, selectedGroupIds: {} };
-    if (selectedIds.length > 1) {
+    if (ids.length > 1) {
       const groupId = crypto.randomUUID();
-      finalElements = newElements.map((el) =>
-        selectedElementIds[el.id] ? newElementWith(el, { groupIds: [...el.groupIds, groupId] }) : el
-      );
+      finalElements = newElements.map((el) => (selectedElementIds[el.id] ? newElementWith(el, { groupIds: [...el.groupIds, groupId] }) : el));
       appStatePatch.selectedGroupIds = { [groupId]: true };
     }
-
-    api.updateScene({ elements: finalElements, appState: appStatePatch });
+    api.updateScene({ elements: finalElements, appState: appStatePatch, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     scheduleSave();
-
-    // Immediately hand off to Excalidraw's own plain "selection" tool
-    // (move/resize) rather than staying in draw-a-selection-region mode —
-    // otherwise the very next drag, meant to move what was just selected,
-    // would be reinterpreted by us as drawing *another* selection region
-    // and cut it again. This is also just how the gesture should feel:
-    // select, then immediately drag to move — not select, then re-arm a
-    // tool button before you can move anything.
+    // Hand straight over to plain select, so the next drag moves the cut.
     setSelectionTool(null);
   }
 
-  function finalizeStroke() {
-    const stroke = drawing.current;
-    drawing.current = null;
-    redrawOverlay();
-    if (!stroke || stroke.points.length < 2) return;
-
-    const api = excalidrawAPIRef.current;
-    if (!api) return;
-    const appState = api.getAppState();
-    const rect = containerRef.current.getBoundingClientRect();
-    const sceneOpts = {
-      zoom: appState.zoom,
-      offsetLeft: rect.left,
-      offsetTop: rect.top,
-      scrollX: appState.scrollX,
-      scrollY: appState.scrollY,
-    };
-    const scenePoints = stroke.points.map((p) => {
-      const s = viewportCoordsToSceneCoords({ clientX: p.clientX, clientY: p.clientY }, sceneOpts);
-      return { x: s.x, y: s.y, pressure: p.pressure };
-    });
-
-    const element = strokeToFreedrawElement({
-      points: scenePoints,
-      color: stroke.color,
-      size: stroke.size / (EXCALIDRAW_FREEDRAW_SIZE_FACTOR * (appState.zoom?.value || 1)),
-      simulatePressure: false,
-    });
-
-    api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), element] });
-    scheduleSave();
-  }
-
-  // Renders the MS-Paint-style selection tool as a literal child of
-  // Excalidraw's own toolbar island (toolbarPortalEl, ".App-toolbar") via a
-  // portal, instead of as a separate custom bar — it reuses Excalidraw's own
-  // ToolIcon/dropdown-menu CSS classes (global, scoped only by an ancestor
-  // ".excalidraw" class, not CSS-modules-hashed) so it inherits the exact
-  // same look, spacing and hover/checked states as every native tool button
-  // beside it. The main icon toggles the last-picked variant on/off; the
-  // small caret opens a flyout to switch between Rectangle and Free-form,
-  // matching the reference screenshot.
   function renderSelectionToolButton() {
     if (!toolbarPortalEl) return null;
     const icon = selectionVariant === 'freeform' ? FreeformSelectIcon : RectSelectIcon;
@@ -1194,37 +1312,28 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
           />
           <div className="ToolIcon__icon">{icon}</div>
         </label>
-        <button
-          type="button"
-          className="quarc-selection-tool__caret"
-          title={t('canvas.selectionToolVariant')}
-          onClick={() => setSelectionMenuOpen((v) => !v)}
-        >
+        <button type="button" className="quarc-selection-tool__caret" title={t('canvas.selectionToolVariant')} onClick={() => setSelectionMenuOpen((v) => !v)}>
           {ChevronDownIcon}
         </button>
         {selectionMenuOpen && (
           <div className="dropdown-menu quarc-selection-tool__menu">
             <div className="dropdown-menu-container Island" style={{ '--padding': 2 }}>
-              <button
-                type="button"
-                className={`dropdown-menu-item dropdown-menu-item-base${selectionVariant === 'rect' ? ' dropdown-menu-item--selected' : ''}`}
-                onClick={() => chooseSelectionVariant('rect')}
-              >
-                <div className="dropdown-menu-item__text">
-                  {RectSelectIcon}
-                  {t('canvas.rectSelect')}
-                </div>
-              </button>
-              <button
-                type="button"
-                className={`dropdown-menu-item dropdown-menu-item-base${selectionVariant === 'freeform' ? ' dropdown-menu-item--selected' : ''}`}
-                onClick={() => chooseSelectionVariant('freeform')}
-              >
-                <div className="dropdown-menu-item__text">
-                  {FreeformSelectIcon}
-                  {t('canvas.freeSelect')}
-                </div>
-              </button>
+              {[
+                ['rect', RectSelectIcon, t('canvas.rectSelect')],
+                ['freeform', FreeformSelectIcon, t('canvas.freeSelect')],
+              ].map(([mode, ic, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`dropdown-menu-item dropdown-menu-item-base${selectionVariant === mode ? ' dropdown-menu-item--selected' : ''}`}
+                  onClick={() => chooseSelectionVariant(mode)}
+                >
+                  <div className="dropdown-menu-item__text">
+                    {ic}
+                    {label}
+                  </div>
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -1233,126 +1342,172 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     );
   }
 
+  // ---------- render ----------
+
+  const colors = paperColors(paperDark);
+  const inkFilter = paperDark ? DARK_INK_FILTER : undefined;
+  const n = settings.pageCount;
+
   return (
-    <div className="relative flex h-full flex-col bg-neutral-200 dark:bg-neutral-950">
-      <div className="flex items-center gap-2 border-b border-neutral-300 bg-gradient-to-r from-amber-50 to-orange-50 p-2.5 dark:border-neutral-700 dark:from-neutral-900 dark:to-neutral-900">
-        {isPenActive && (
-          <div className="relative">
-            <button
-              className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
-              onClick={() => setShowPenOptions((s) => !s)}
-            >
-              <span className="inline-block h-3.5 w-3.5 rounded-full ring-1 ring-black/10" style={{ backgroundColor: penColor }} />
-              {t('canvas.penOptions')}
-            </button>
-            {showPenOptions && (
-              <div className="absolute left-0 top-full z-10 mt-2 w-60 rounded-xl bg-white p-3 shadow-lg ring-1 ring-neutral-200 dark:bg-neutral-800 dark:ring-neutral-700">
-                <div className="mb-1.5 text-xs font-medium text-neutral-400">{t('canvas.penSize')}</div>
-                <div className="mb-3 flex gap-2">
-                  {PEN_SIZES.map((p) => (
-                    <button
-                      key={p.size}
-                      onClick={() => setPenSize(p.size)}
-                      className={`flex h-10 flex-1 items-center justify-center rounded-lg transition ${
-                        penSize === p.size ? 'bg-accent' : 'bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-700'
-                      }`}
-                    >
-                      <span
-                        className="rounded-full"
-                        style={{
-                          width: p.dot,
-                          height: p.dot,
-                          backgroundColor: penSize === p.size ? '#fff' : penColor,
-                        }}
-                      />
-                    </button>
-                  ))}
-                </div>
-                <div className="mb-1.5 text-xs font-medium text-neutral-400">{t('canvas.penColor')}</div>
-                <div className="flex gap-2">
-                  {PEN_COLORS.map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => setPenColor(c)}
-                      className={`h-7 w-7 rounded-full ring-2 transition ${penColor === c ? 'ring-accent' : 'ring-transparent hover:ring-neutral-300'}`}
-                      style={{ backgroundColor: c }}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-        <div className="relative">
-          <button
-            className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm ring-1 ring-neutral-200 transition hover:ring-accent dark:bg-neutral-800 dark:text-neutral-200 dark:ring-neutral-700"
-            onClick={() => setShowSettings((s) => !s)}
-          >
-            📄 {t('canvas.pageSettings')}
-          </button>
-          {showSettings && (
-            <div className="absolute left-0 top-full z-10 mt-2 w-60 rounded-xl bg-white p-3 shadow-lg ring-1 ring-neutral-200 dark:bg-neutral-800 dark:ring-neutral-700">
-              <label className="mb-3 block text-sm">
-                <span className="mb-1 block text-xs font-medium text-neutral-400">{t('canvas.pageSize')}</span>
-                <select
-                  className="w-full rounded-lg border border-neutral-300 bg-transparent px-2 py-1.5 dark:border-neutral-600"
-                  value={settings.pageSize}
-                  onChange={(e) => updateSettings({ pageSize: e.target.value })}
-                >
-                  {Object.entries(PAGE_SIZES).map(([key, v]) => (
-                    <option key={key} value={key}>{v.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-sm">
-                <span className="mb-1 block text-xs font-medium text-neutral-400">{t('canvas.pageStyle')}</span>
-                <select
-                  className="w-full rounded-lg border border-neutral-300 bg-transparent px-2 py-1.5 dark:border-neutral-600"
-                  value={settings.pageStyle}
-                  onChange={(e) => updateSettings({ pageStyle: e.target.value })}
-                >
-                  <option value="lined">{t('canvas.lined')}</option>
-                  <option value="squared">{t('canvas.squared')}</option>
-                  <option value="empty">{t('canvas.empty')}</option>
-                </select>
-              </label>
-            </div>
-          )}
-        </div>
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <CanvasToolbar
+        drawMode={isDrawTool ? settings.tool : null}
+        onDrawMode={selectDrawMode}
+        pen={{ color: settings.penColor, size: settings.penSize }}
+        highlighter={{ color: settings.hlColor, size: settings.hlSize }}
+        onPenChange={changePen}
+        onHighlighterChange={changeHighlighter}
+        shapeSnap={shapeSnap}
+        onToggleShapeSnap={() => updatePrefs({ shapeSnap: !shapeSnap })}
+        fingerDraws={fingerDraws}
+        onToggleFinger={() => updatePrefs({ fingerMode: fingerDraws ? 'scroll' : 'draw' })}
+        settings={settings}
+        onSettings={updateSettings}
+        paperFollowsTheme={paperFollowsTheme}
+        onPaperFollowsTheme={(v) => updatePrefs({ paperFollowsTheme: v })}
+        onUndo={undo}
+        onRedo={redo}
+        onAddPage={() => addPage(currentSheetRef.current)}
+        inkFilter={inkFilter}
+      />
       <div
-        ref={containerRefCallback}
-        className={`quarc-canvas-page relative flex-1 overflow-hidden bg-neutral-300 dark:bg-neutral-800 ${isPenActive ? 'quarc-pen-active' : ''}`}
-        style={{
-          touchAction: isPenActive || selectionTool ? 'none' : 'auto',
-          cursor: selectionTool ? 'crosshair' : undefined,
-        }}
+        ref={containerRef}
+        className={`quarc-canvas-page relative min-h-0 flex-1 overflow-hidden ${isDrawTool ? 'quarc-pen-active' : ''}`}
+        style={{ backgroundColor: colors.desk, touchAction: 'none', cursor: selectionTool ? 'crosshair' : undefined }}
         onPointerDownCapture={handlePointerDownCapture}
         onPointerMoveCapture={handlePointerMoveCapture}
         onPointerUpCapture={handlePointerUpCapture}
         onPointerCancelCapture={handlePointerUpCapture}
-        onPointerLeave={handlePointerUpCapture}
+        onLostPointerCapture={(e) => {
+          if (drawing.current?.pointerId === e.pointerId) endStroke();
+        }}
       >
         <style>{`
           .quarc-canvas-page.quarc-pen-active .App-menu__left { display: none !important; }
           .quarc-canvas-page .excalidraw { --color-primary: #f59e0b; --color-primary-darker: #d97706; --color-primary-darkest: #b45309; --color-primary-light: #fef3c7; --color-primary-light-darker: #fde68a; --color-primary-hover: #d97706; }
+          .quarc-canvas-page .excalidraw.theme--dark { --color-primary-light: #78350f; --color-primary-light-darker: #92400e; }
           .quarc-canvas-page .quarc-selection-tool { margin-left: 2px; }
           .quarc-canvas-page .quarc-selection-tool__caret { width: 14px; align-self: stretch; display: flex; align-items: center; justify-content: center; border: 0; background: transparent; cursor: pointer; color: var(--color-on-surface); border-radius: var(--border-radius-md); }
           .quarc-canvas-page .quarc-selection-tool__caret:hover { background-color: var(--button-hover-bg); }
           .quarc-canvas-page .quarc-selection-tool__menu { left: 0; z-index: 2; min-width: 9.5rem; }
           .quarc-canvas-page .quarc-selection-tool__menu .dropdown-menu-container { display: flex; flex-direction: column; gap: 2px; padding: 4px; }
         `}</style>
-        <div ref={pageRef} className="pointer-events-none absolute bg-white shadow-xl" />
-        <canvas ref={patternCanvasRef} className="pointer-events-none absolute inset-0" />
+        <canvas ref={paperRef} className="pointer-events-none absolute inset-0" />
         <Excalidraw
-          key={page.id}
           excalidrawAPI={handleExcalidrawAPI}
-          initialData={initialData}
+          initialData={{
+            elements: initial.elements,
+            files: initial.files,
+            appState: {
+              viewBackgroundColor: 'transparent',
+              activeTool: { type: 'freedraw' },
+              currentItemRoughness: 0,
+              currentItemStrokeColor: settings.penColor,
+            },
+          }}
           onChange={handleExcalidrawChange}
           onScrollChange={handleScrollChange}
-          theme="light"
+          theme={paperDark ? 'dark' : 'light'}
+          langCode={i18n.language === 'tr' ? 'tr-TR' : 'en'}
+          UIOptions={UI_OPTIONS}
         />
-        <canvas ref={overlayCanvasRef} className="pointer-events-none absolute inset-0" />
+        <canvas ref={overlayRef} className="pointer-events-none absolute inset-0" style={{ filter: inkFilter }} />
+
+        <button
+          ref={addPageBtnRef}
+          type="button"
+          onClick={() => addPage(settingsRef.current.pageCount - 1)}
+          className="absolute left-0 top-0 z-[3] flex items-center gap-1.5 rounded-full border border-dashed border-neutral-400 bg-white/80 px-3 py-1.5 text-sm font-medium text-neutral-600 shadow-sm backdrop-blur hover:border-accent hover:text-accent-dark dark:border-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-300"
+          style={{ visibility: 'hidden' }}
+        >
+          <Plus size={16} /> {t('canvas.addPage')}
+        </button>
+
+        <div className="pointer-events-none absolute inset-x-0 bottom-[72px] z-[4] flex justify-center min-[730px]:bottom-4">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-full border border-neutral-200 bg-white/90 p-1 text-sm shadow-lg backdrop-blur dark:border-neutral-700 dark:bg-neutral-800/90">
+            <button
+              type="button"
+              title={t('canvas.prevPage')}
+              disabled={currentSheet === 0}
+              onClick={() => goToSheet(currentSheet - 1)}
+              className="rounded-full p-1.5 text-neutral-600 hover:bg-neutral-100 disabled:opacity-30 dark:text-neutral-300 dark:hover:bg-neutral-700"
+            >
+              <ChevronUp size={16} />
+            </button>
+            <span className="min-w-[3.5rem] text-center tabular-nums text-neutral-700 dark:text-neutral-200">
+              {currentSheet + 1} / {n}
+            </span>
+            <button
+              type="button"
+              title={t('canvas.nextPage')}
+              disabled={currentSheet >= n - 1}
+              onClick={() => goToSheet(currentSheet + 1)}
+              className="rounded-full p-1.5 text-neutral-600 hover:bg-neutral-100 disabled:opacity-30 dark:text-neutral-300 dark:hover:bg-neutral-700"
+            >
+              <ChevronDown size={16} />
+            </button>
+            <button
+              type="button"
+              title={t('canvas.addPage')}
+              onClick={() => addPage(currentSheet)}
+              className="rounded-full p-1.5 text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-700"
+            >
+              <Plus size={16} />
+            </button>
+            <span ref={pageMenuBtnRef}>
+              <button
+                type="button"
+                title={t('canvas.pageMenu')}
+                onClick={() => setPageMenuOpen((v) => !v)}
+                className="rounded-full p-1.5 text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-700"
+              >
+                <MoreHorizontal size={16} />
+              </button>
+            </span>
+          </div>
+        </div>
+        <Popover anchorRef={pageMenuBtnRef} open={pageMenuOpen} onClose={() => setPageMenuOpen(false)} align="center" className="w-56">
+          <MenuItem
+            icon={FilePlus2}
+            onClick={() => {
+              setPageMenuOpen(false);
+              addPage(currentSheet);
+            }}
+          >
+            {t('canvas.addPageAfter')}
+          </MenuItem>
+          <MenuItem
+            icon={ArrowUpToLine}
+            disabled={currentSheet === 0}
+            onClick={() => {
+              setPageMenuOpen(false);
+              goToSheet(0);
+            }}
+          >
+            {t('canvas.firstPage')}
+          </MenuItem>
+          <MenuItem
+            icon={ArrowDownToLine}
+            disabled={currentSheet >= n - 1}
+            onClick={() => {
+              setPageMenuOpen(false);
+              goToSheet(n - 1);
+            }}
+          >
+            {t('canvas.lastPage')}
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem
+            icon={Trash2}
+            danger
+            onClick={() => {
+              setPageMenuOpen(false);
+              deletePage(currentSheet);
+            }}
+          >
+            {n > 1 ? t('canvas.deletePage') : t('canvas.clearPage')}
+          </MenuItem>
+        </Popover>
         {renderSelectionToolButton()}
       </div>
     </div>

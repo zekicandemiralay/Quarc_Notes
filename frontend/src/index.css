@@ -2,10 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
 }
 
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
-  @apply bg-neutral-50 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100;
+  @apply bg-white text-neutral-900 antialiased dark:bg-neutral-900 dark:text-neutral-100;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: rgb(245 158 11 / 0.3);
+}
+
+/* Thin, theme-aware scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(163 163 163 / 0.5) transparent;
+}
+
+/* BlockNote: blend into the page in both themes, use the app font. */
+.quarc-editor.bn-container {
+  --bn-font-family: inherit;
+  --bn-colors-editor-background: transparent;
+}
+.quarc-editor.bn-container[data-color-scheme] .bn-editor {
+  background-color: transparent;
+}
+.quarc-editor.bn-container[data-color-scheme='dark'] {
+  --bn-colors-editor-background: transparent;
+  --bn-colors-editor-text: #e5e5e5;
+  --bn-colors-menu-background: #262626;
+  --bn-colors-tooltip-background: #262626;
+  --bn-colors-hovered-background: #333333;
+  --bn-colors-selected-background: #404040;
+  --bn-colors-side-menu: #737373;
+  --bn-colors-border: #404040;
+}
+.quarc-editor .bn-editor {
+  padding-bottom: 6rem;
+}
+@media (max-width: 640px) {
+  .quarc-editor .bn-editor {
+    padding-inline: 12px;
+  }
+}
+.quarc-editor .bn-inline-content mark {
+  border-radius: 2px;
 }

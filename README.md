@@ -6,14 +6,19 @@ backlinks, and a drawing canvas — synced across every device, offline-friendly
 the **same login as Quarc Music** (and every other Quarc app).
 
 **Features:**
-- Nested pages with a Notion-style block editor (headings, lists, etc.)
-- Obsidian-style `[[wikilinks]]` — type `[` to link to another page, with a backlinks panel showing what links to the current page
-- Pressure-sensitive handwriting/drawing pages, built for stylus input (S-Pen, Apple Pencil, Wacom) via the Pointer Events API
-- Full-text search across all your notes
-- Trash with restore / permanent delete
-- Offline support — reads and edits are cached locally and synced back when reconnected
-- One shared account across every Quarc app — log in once, same credentials everywhere
-- Android APK, Windows/macOS/Linux desktop apps, and PWA (Add to Home Screen on iOS/Android)
+- **Pages** — a Notion-style block editor (headings, lists, checklists, tables, code, images with upload), nested pages, emoji icons, favorites, duplicate, move, Markdown export
+- **Links** — type `[` to link another page (or create one on the spot); links follow renames, and every page shows its "Linked mentions" (works offline)
+- **Notebooks** — pressure-sensitive handwriting for stylus input (S-Pen, Apple Pencil, Wacom):
+  - multi-page notebooks (A5/A4/Letter, portrait/landscape, lined/squared/dotted/blank paper) with a page navigator, add/insert/delete page
+  - **hold to snap**: keep the pen still at the end of a stroke and it becomes a clean straight line, arc, L-shape, circle/ellipse, rectangle/square, triangle, diamond or polygon — keep holding to move/resize/rotate it into place; afterwards it stays an editable shape
+  - pen + highlighter (drawn under the ink), custom colours, stylus button/eraser end erases, undo/redo (also two-finger tap)
+  - palm rejection; fingers scroll (with momentum) once a stylus is used, or draw on phones; pinch to zoom, double-tap to fit
+  - cut-selection (rectangle / free-form) that really cuts through strokes, plus all Excalidraw shapes and text
+- **Dark mode** — light / dark / follow system, including dark paper for notebooks
+- **Search** — Ctrl/⌘ K quick switcher and full-text search across pages, tables and text in drawings
+- **Offline-first sync** — everything works offline and syncs when back online; edits from two devices never get lost (drawings merge stroke by stroke, a document edited on both keeps both versions)
+- **Trash** with restore (sub-pages included) and delete forever
+- One shared account across every Quarc app; Android APK, Windows/macOS/Linux desktop apps, and PWA (Add to Home Screen on iOS/Android)
 
 ---
 
@@ -102,3 +107,19 @@ Users need Tailscale installed and connected, then:
 - **Anyone else**: just open the URL above in a browser
 
 Log in with the same username/password you use for Quarc Music — it's the same account.
+
+---
+
+## Part 3 — Development
+
+```bash
+cd backend && npm install && npm test     # API + sync tests (temporary SQLite database)
+cd frontend && npm install && npm test    # hold-to-snap shape recognition tests
+cd frontend && npm run dev                # dev server; proxies /api/auth to :3902 (quarc-auth) and /api to :3903
+```
+
+Sync protocol (backend `routes/sync.js`): devices push only the fields they changed, with the
+server version their edit was based on; the server detects real conflicts per page *content*
+(another device changed it since) and resolves them without losing anything. Older app
+versions' push/pull format is still accepted.
+

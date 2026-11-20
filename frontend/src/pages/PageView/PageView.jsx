@@ -1,106 +1,328 @@
-import { useEffect, useState, useCallback } from 'react';
-import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getPage, updatePage, trashPage } from '../../lib/api';
-import Editor from './Editor';
-import CanvasPage from './CanvasPage';
+import { Star, Menu, ChevronRight, Copy, Download, SmilePlus, RotateCcw, Trash2 } from 'lucide-react';
+import { getPage, updatePage, setFavorite, restorePage, purgePage } from '../../lib/api';
+import { usePageIndex, ancestorsOf } from '../../lib/pageIndex';
+import { on } from '../../lib/events';
+import { countWords } from '../../lib/content';
+import { relativeTime } from '../../lib/time';
+import PageActions from '../../components/PageActions';
+import PageIcon from '../../components/PageIcon';
+import IconPicker from '../../components/IconPicker';
+import { MenuItem } from '../../components/Popover';
+import { toast } from '../../components/Toasts';
 import BacklinksPanel from './BacklinksPanel';
+
+// The editors are big (BlockNote, Excalidraw): load them only when needed.
+const Editor = lazy(() => import('./Editor'));
+const CanvasPage = lazy(() => import('./CanvasPage'));
+
+function Spinner() {
+  return (
+    <div className="flex h-full min-h-[40vh] items-center justify-center">
+      <div className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-300 border-t-accent" />
+    </div>
+  );
+}
+
+function download(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function Breadcrumbs({ id }) {
+  const { t } = useTranslation();
+  const byId = usePageIndex((s) => s.byId);
+  const trail = ancestorsOf(byId, id);
+  if (!trail.length) return null;
+  return (
+    <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-sm text-neutral-500">
+      {trail.slice(-3).map((p) => (
+        <span key={p.id} className="flex min-w-0 items-center gap-1">
+          <Link to={`/page/${p.id}`} className="flex min-w-0 items-center gap-1 truncate rounded px-1 py-0.5 hover:bg-neutral-100 dark:hover:bg-neutral-800">
+            <PageIcon page={p} size={14} />
+            <span className="truncate">{p.title || t('page.untitled')}</span>
+          </Link>
+          <ChevronRight size={14} className="shrink-0 opacity-50" />
+        </span>
+      ))}
+    </nav>
+  );
+}
 
 export default function PageView() {
   const { id } = useParams();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const { refreshSidebar, collapseSidebar, sidebarCollapsed } = useOutletContext();
-  const [page, setPage] = useState(null);
+  const { sidebarVisible, openSidebar, collapseForCanvas } = useOutletContext();
+  const meta = usePageIndex((s) => s.byId[id]);
+  const indexLoaded = usePageIndex((s) => s.loaded);
+  const [page, setPage] = useState(undefined); // undefined: loading, null: not here
   const [title, setTitle] = useState('');
+  const [words, setWords] = useState(0);
+  const [iconOpen, setIconOpen] = useState(false);
+  const iconBtn = useRef(null);
+  const titleRef = useRef(null);
+  const titleFocused = useRef(false);
+  const titleTimer = useRef(null);
+  const editorRef = useRef(null);
+
+  const load = useCallback(async () => {
+    const p = await getPage(id);
+    setPage(p);
+    if (p) {
+      setTitle(p.title || '');
+      if (p.type !== 'canvas') setWords(countWords(p.content_json));
+    }
+    return p;
+  }, [id]);
+
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   useEffect(() => {
-    let cancelled = false;
-    getPage(id).then((p) => {
-      if (!cancelled) {
-        setPage(p);
-        setTitle(p?.title || '');
-        if (p?.type === 'canvas') collapseSidebar?.();
-      }
+    setPage(undefined);
+    load().then((p) => {
+      if (p?.type === 'canvas') collapseForCanvas?.();
     });
-    return () => {
-      cancelled = true;
-    };
-  }, [id, collapseSidebar]);
+    // A page opened from a link before the first sync brought it down.
+    return on('pages-changed', (ids) => {
+      if (ids.includes(id) && !pageRef.current) load();
+    });
+  }, [id, load, collapseForCanvas]);
 
-  const handleTitleBlur = useCallback(async () => {
-    if (!page || title === page.title) return;
-    await updatePage(page.id, { title });
-    refreshSidebar();
-  }, [page, title, refreshSidebar]);
+  // Renamed elsewhere (another device, the sidebar): follow it.
+  useEffect(() => {
+    if (meta && !titleFocused.current && meta.title !== undefined) setTitle(meta.title || '');
+  }, [meta?.title]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleContentChange = useCallback(
-    async (content_json) => {
-      await updatePage(id, { content_json });
-    },
-    [id]
-  );
+  useEffect(() => {
+    const el = titleRef.current;
+    if (el && el.tagName === 'TEXTAREA') {
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+    }
+  }, [title, page?.type]);
 
-  const handleInkChange = useCallback(
-    async (ink_json) => {
-      await updatePage(id, { ink_json });
-    },
-    [id]
-  );
-
-  const handleSettingsChange = useCallback(
-    async (canvas_settings) => {
-      await updatePage(id, { canvas_settings });
-    },
-    [id]
-  );
-
-  async function handleTrash() {
-    await trashPage(id);
-    refreshSidebar();
-    navigate('/');
+  function saveTitle(value) {
+    clearTimeout(titleTimer.current);
+    titleTimer.current = null;
+    if (value !== (usePageIndex.getState().byId[id]?.title ?? '')) updatePage(id, { title: value });
   }
 
-  if (!page) return <div className="p-8 text-neutral-400">Loading…</div>;
+  function onTitleChange(value) {
+    setTitle(value);
+    clearTimeout(titleTimer.current);
+    titleTimer.current = setTimeout(() => saveTitle(value), 500);
+  }
 
-  if (page.type === 'canvas') {
+  useEffect(() => () => titleTimer.current && saveTitle(titleRef.current?.value ?? ''), [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleContentSave = useCallback(
+    (content_json, opts) => {
+      updatePage(id, { content_json }, opts);
+      setWords(countWords(content_json));
+    },
+    [id]
+  );
+  const handleInkSave = useCallback((ink_json, opts) => updatePage(id, { ink_json }, opts), [id]);
+  const handleSettingsChange = useCallback((canvas_settings) => updatePage(id, { canvas_settings }), [id]);
+
+  if (page === undefined) return <Spinner />;
+  if (page === null) {
     return (
-      <div className="flex h-full flex-col">
-        <div className={`flex items-center justify-between border-b border-neutral-200 px-4 py-2 dark:border-neutral-700 ${sidebarCollapsed ? 'pl-12' : ''}`}>
-          <input
-            className="flex-1 bg-transparent text-lg font-semibold outline-none"
-            value={title}
-            placeholder={t('page.untitled')}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={handleTitleBlur}
-          />
-          <button onClick={handleTrash} className="text-sm text-neutral-400 hover:text-red-500">
-            🗑️ {t('page.delete')}
-          </button>
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center text-neutral-500">
+        {!indexLoaded ? <Spinner /> : <p>{t('page.notFound')}</p>}
+        <Link to="/" className="text-accent-dark hover:underline">
+          {t('nav.home')}
+        </Link>
+      </div>
+    );
+  }
+
+  const current = meta || page;
+  const isCanvas = page.type === 'canvas';
+  const edited = current.updated_at ? relativeTime(current.updated_at, i18n.language) : '';
+
+  const exportItems = isCanvas
+    ? null
+    : (close) => (
+        <>
+          <MenuItem
+            icon={Copy}
+            onClick={async () => {
+              close();
+              try {
+                await navigator.clipboard.writeText(editorRef.current?.toMarkdown() || '');
+                toast(t('page.copiedMarkdown'));
+              } catch {
+                toast(t('page.copyFailed'));
+              }
+            }}
+          >
+            {t('page.copyMarkdown')}
+          </MenuItem>
+          <MenuItem
+            icon={Download}
+            onClick={() => {
+              close();
+              download(`${(title || t('page.untitled')).replace(/[\\/:*?"<>|]+/g, '_')}.md`, editorRef.current?.toMarkdown() || '');
+            }}
+          >
+            {t('page.downloadMarkdown')}
+          </MenuItem>
+        </>
+      );
+
+  const header = (
+    <div className="flex h-12 shrink-0 items-center gap-2 px-3">
+      {!sidebarVisible && (
+        <button
+          type="button"
+          onClick={openSidebar}
+          title={t('sidebar.expand')}
+          className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+        >
+          <Menu size={18} />
+        </button>
+      )}
+      <div className="flex min-w-0 flex-1 items-center gap-1">
+        <Breadcrumbs id={id} />
+        {isCanvas && (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <span ref={iconBtn}>
+              <button type="button" onClick={() => setIconOpen(true)} className="rounded p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800">
+                <PageIcon page={current} size={18} />
+              </button>
+            </span>
+            <input
+              ref={titleRef}
+              className="min-w-0 flex-1 truncate bg-transparent text-base font-semibold outline-none placeholder:text-neutral-400"
+              value={title}
+              placeholder={t('page.untitled')}
+              onFocus={() => (titleFocused.current = true)}
+              onBlur={() => {
+                titleFocused.current = false;
+                saveTitle(title);
+              }}
+              onChange={(e) => onTitleChange(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+            />
+          </div>
+        )}
+      </div>
+      {edited && <span className="hidden shrink-0 text-xs text-neutral-400 sm:inline">{t('page.edited', { when: edited })}</span>}
+      <button
+        type="button"
+        title={current.is_favorite ? t('page.unfavorite') : t('page.favorite')}
+        onClick={() => setFavorite(id, !current.is_favorite)}
+        className={`rounded-lg p-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-800 ${current.is_favorite ? 'text-amber-500' : 'text-neutral-400'}`}
+      >
+        <Star size={18} fill={current.is_favorite ? 'currentColor' : 'none'} />
+      </button>
+      <PageActions page={current} extra={exportItems} iconSize={18} />
+    </div>
+  );
+
+  const trashBanner = current.is_deleted ? (
+    <div className="flex flex-wrap items-center justify-center gap-3 bg-red-500/10 px-4 py-2 text-sm text-red-700 dark:text-red-300">
+      {t('page.inTrash')}
+      <button type="button" onClick={() => restorePage(id)} className="flex items-center gap-1 font-medium hover:underline">
+        <RotateCcw size={14} /> {t('page.restore')}
+      </button>
+      <button
+        type="button"
+        onClick={async () => {
+          if (!window.confirm(t('page.deleteForeverConfirm'))) return;
+          await purgePage(id);
+          navigate('/trash');
+        }}
+        className="flex items-center gap-1 font-medium hover:underline"
+      >
+        <Trash2 size={14} /> {t('page.deleteForever')}
+      </button>
+    </div>
+  ) : null;
+
+  const iconPicker = (
+    <IconPicker anchorRef={iconBtn} open={iconOpen} onClose={() => setIconOpen(false)} onPick={(icon) => updatePage(id, { icon })} />
+  );
+
+  if (isCanvas) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="border-b border-neutral-200 dark:border-neutral-800">{header}</div>
+        {trashBanner}
+        <div className="min-h-0 flex-1">
+          <Suspense fallback={<Spinner />}>
+            <CanvasPage key={page.id} page={page} onChange={handleInkSave} onSettingsChange={handleSettingsChange} />
+          </Suspense>
         </div>
-        <div className="flex-1">
-          <CanvasPage page={page} onChange={handleInkChange} onSettingsChange={handleSettingsChange} />
-        </div>
+        {iconPicker}
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-8 py-10">
-      <div className="mb-4 flex items-center justify-between">
-        <input
-          className="w-full bg-transparent text-3xl font-bold outline-none"
-          value={title}
-          placeholder={t('page.untitled')}
-          onChange={(e) => setTitle(e.target.value)}
-          onBlur={handleTitleBlur}
-        />
-        <button onClick={handleTrash} className="ml-4 whitespace-nowrap text-sm text-neutral-400 hover:text-red-500">
-          🗑️ {t('page.delete')}
-        </button>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="sticky top-0 z-10 bg-white/85 backdrop-blur dark:bg-neutral-900/85">{header}</div>
+      {trashBanner}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl px-4 pb-24 pt-6 sm:px-12 sm:pt-10">
+          <div className="group mb-2 px-[54px] max-sm:px-3">
+            <span ref={iconBtn} className="inline-block">
+              {current.icon ? (
+                <button type="button" onClick={() => setIconOpen(true)} className="mb-2 rounded-xl p-1 text-5xl leading-none hover:bg-neutral-100 dark:hover:bg-neutral-800">
+                  {current.icon}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setIconOpen(true)}
+                  className="mb-1 flex items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-neutral-400 opacity-100 transition hover:bg-neutral-100 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-neutral-800"
+                >
+                  <SmilePlus size={16} /> {t('page.addIcon')}
+                </button>
+              )}
+            </span>
+            <textarea
+              ref={titleRef}
+              rows={1}
+              className="block w-full resize-none overflow-hidden bg-transparent text-3xl font-bold leading-tight outline-none placeholder:text-neutral-300 sm:text-4xl dark:placeholder:text-neutral-600"
+              value={title}
+              placeholder={t('page.untitled')}
+              onFocus={() => (titleFocused.current = true)}
+              onBlur={() => {
+                titleFocused.current = false;
+                saveTitle(title);
+              }}
+              onChange={(e) => onTitleChange(e.target.value.replace(/\n/g, ''))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (editorRef.current) editorRef.current.focus();
+                  else document.querySelector('.quarc-editor .ProseMirror')?.focus();
+                }
+              }}
+            />
+          </div>
+          <Suspense fallback={<Spinner />}>
+            <Editor key={page.id} ref={editorRef} page={page} onSave={handleContentSave} />
+          </Suspense>
+          <div className="px-[54px] max-sm:px-3">
+            <BacklinksPanel pageId={page.id} />
+            <p className="mt-6 text-xs text-neutral-400">{t('page.wordCount', { count: words })}</p>
+          </div>
+        </div>
       </div>
-      <Editor key={page.id} page={page} onChange={handleContentChange} />
-      <BacklinksPanel pageId={page.id} />
+      {iconPicker}
     </div>
   );
 }
