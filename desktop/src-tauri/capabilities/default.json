@@ -1,14 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capability for the main window",
-  "windows": [
-    "main"
-  ],
+  "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    "allow-quarc-sso-peek",
-    "allow-quarc-sso-sync",
-    "allow-quarc-sso-open-store"
+    "shell:allow-open"
   ]
 }

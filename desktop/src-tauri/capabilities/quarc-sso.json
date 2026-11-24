@@ -1,0 +1,17 @@
+{
+  "identifier": "quarc-sso",
+  "description": "Quarc Store single sign-on. The window shows a page from the Quarc server, and Tauri only lets such a page call app commands that are allowed for its address: these three, and nothing else (sso-kit/README.md).",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "https://quarcnet0.tail84500c.ts.net:4001/*"
+    ]
+  },
+  "permissions": [
+    "allow-quarc-sso-peek",
+    "allow-quarc-sso-sync",
+    "allow-quarc-sso-open-store"
+  ]
+}
