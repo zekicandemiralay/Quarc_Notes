@@ -94,9 +94,10 @@ fn sync(package: &str, webview: &Webview, server_origin: &str, force: bool) -> R
     if origin.scheme() != "https" {
         return Err("An https serverOrigin is required".into());
     }
-    // The login may only be handed to the server this app's own window is showing.
+    // The login may only be handed to the server this app's own window is showing, or by this app's own
+    // bundled copy of the page (the Windows Weather app carries its page inside the app).
     #[cfg(not(debug_assertions))]
-    if webview.url().ok().and_then(|u| u.host_str().map(str::to_owned)).as_deref() != Some(host.as_str()) {
+    if !window_may_use(webview.url().ok().as_ref().and_then(|u| u.host_str()), &host) {
         return Err("origin_mismatch".into());
     }
 
@@ -147,6 +148,13 @@ fn sync(package: &str, webview: &Webview, server_origin: &str, force: bool) -> R
         },
     }
     Ok(out)
+}
+
+/// Which page may use the Store's login: the Quarc server's own page, or the app's own bundled copy of it, which
+/// is embedded in the app and served from tauri.localhost (nobody else can be shown there).
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn window_may_use(window_host: Option<&str>, server_host: &str) -> bool {
+    matches!(window_host, Some(h) if h == server_host || h == "tauri.localhost")
 }
 
 enum SignIn {
@@ -303,6 +311,17 @@ fn spawn_detached(exe: &Path, arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_server_page_and_the_apps_own_bundled_page_may_sign_in_nobody_else() {
+        let server = "quarcnet0.tail84500c.ts.net";
+        assert!(window_may_use(Some(server), server));
+        assert!(window_may_use(Some("tauri.localhost"), server));
+        assert!(!window_may_use(Some("evil.example"), server));
+        assert!(!window_may_use(Some("tauri.localhost.evil.example"), server));
+        assert!(!window_may_use(Some("localhost"), server));
+        assert!(!window_may_use(None, server));
+    }
 
     #[test]
     fn acts_only_when_the_store_state_changed() {

@@ -39,6 +39,14 @@ function withTimeout(promise, ms, fallback) {
  * @returns {Promise<{result: 'unavailable'|'denied'|'unchanged'|'none'|'signed_in'|'signed_out'|'error'|'timeout', user?: object}>}
  */
 export async function syncFromStore({ force = false } = {}) {
+  const r = await syncOnce(force);
+  // Windows: a sync that fails just as the app opens (the network or the server hiccups) is not left for the
+  // user to fix by switching windows — it is tried again a few times, quietly.
+  if (!force && (r.result === 'error' || r.result === 'timeout') && !androidPlugin() && desktopPlugin()) retryInBackground();
+  return r;
+}
+
+async function syncOnce(force) {
   const p = plugin();
   const origin = serverOrigin();
   if (!p || !origin) return { result: 'unavailable' };
@@ -47,6 +55,30 @@ export async function syncFromStore({ force = false } = {}) {
   } catch {
     return { result: 'error' };
   }
+}
+
+const RETRY_AFTER_MS = [1500, 4000, 9000];
+let retrying = false;
+let onStoreChange = null;
+
+function retryInBackground() {
+  if (retrying) return;
+  retrying = true;
+  (async () => {
+    try {
+      for (const wait of RETRY_AFTER_MS) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        const r = await syncOnce(false);
+        if (r.result === 'error' || r.result === 'timeout') continue;
+        // Applied now (by this retry, or by the slow first attempt finishing meanwhile): the app re-checks its
+        // session, exactly as when the window regains focus.
+        if (r.result === 'signed_in' || r.result === 'signed_out' || r.result === 'unchanged') onStoreChange?.(r);
+        break;
+      }
+    } finally {
+      retrying = false;
+    }
+  })();
 }
 
 /** Whether the Store is installed and who is signed in to it — changes nothing. */
@@ -166,6 +198,7 @@ let watching = false;
  * (Android: the app resumes. Windows: the window gets focus.)
  */
 export function watchStoreSession(onChange) {
+  onStoreChange = onChange;
   if (watching) return;
   const recheck = async () => {
     const r = await syncFromStore();
