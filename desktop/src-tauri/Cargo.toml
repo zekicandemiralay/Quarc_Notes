@@ -10,6 +10,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+# "Export" opens a native Save-as dialog and writes the file the person picked.
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 # cookie 0.18.1 uses the old 1-arg parse() API; time 0.3.52 changed it to 2 args.
 # Pin below the break until Tauri pulls in a fixed cookie version.
 time = { version = ">=0.3, <0.3.52" }

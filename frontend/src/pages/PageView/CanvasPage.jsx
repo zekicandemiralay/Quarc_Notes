@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Excalidraw,
@@ -115,7 +115,7 @@ function pruneDeleted(elements) {
   return elements.filter((el) => !el.isDeleted || (el.updated || 0) > cutoff);
 }
 
-export default function CanvasPage({ page, onChange, onSettingsChange }) {
+const CanvasPage = forwardRef(function CanvasPage({ page, onChange, onSettingsChange }, ref) {
   const { t, i18n } = useTranslation();
   const isDark = useSettings((s) => s.isDark);
   const paperFollowsTheme = useSettings((s) => s.paperFollowsTheme);
@@ -163,6 +163,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
   const prefsRef = useRef({});
   prefsRef.current = { fingerDraws, shapeSnap, paperDark };
   const currentSheetRef = useRef(0);
+  const fitWidthRef = useRef(false);
+  const fitCanRef = useRef(false);
+  const [fitWidthState, setFitWidthState] = useState({ active: false, can: false }); // zoomed to the page width / is that different from fitting the page
 
   const drawing = useRef(null); // pen/mouse/finger stroke in progress
   const erasing = useRef(null); // stylus-button erase in progress
@@ -213,6 +216,16 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       const visible = top < rect.height - 130 && top > -40;
       btn.style.transform = `translate(${Math.round(centerX - btn.offsetWidth / 2)}px, ${Math.round(top)}px)`;
       btn.style.visibility = visible ? 'visible' : 'hidden';
+    }
+
+    const fitP = fitPageZoom(rect, dims);
+    const fitW = Math.min(fitWidthZoom(rect, dims), MAX_ZOOM);
+    const can = fitW > fitP * 1.08;
+    const active = can && Math.abs(view.zoom - fitW) < 0.02 * fitW;
+    if (active !== fitWidthRef.current || can !== fitCanRef.current) {
+      fitWidthRef.current = active;
+      fitCanRef.current = can;
+      setFitWidthState({ active, can });
     }
 
     const centerSceneY = rect.height / 2 / view.zoom - view.scrollY;
@@ -347,6 +360,18 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     lastSavedJson.current = JSON.stringify(ink);
     onChange(ink, { base: contentBase.current });
   }
+
+  // For the page: export reads the notebook exactly as it is on screen.
+  useImperativeHandle(ref, () => ({
+    flush: saveNow,
+    getExportData: () => {
+      const api = apiRef.current;
+      return {
+        ink: { elements: api ? api.getSceneElements() : [], files: api ? api.getFiles() : {} },
+        settings: settingsRef.current,
+      };
+    },
+  }));
 
   function scheduleSave() {
     clearTimeout(saveTimer.current);
@@ -952,7 +977,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
 
   // Double-tap: fit the whole sheet; on a fitted sheet, zoom to the page
   // width around where you tapped (handy on phones in portrait).
-  function toggleFit(clientY) {
+  // Fits the sheet at the vertical position `clientY` to the page width
+  // ('width') or whole ('page').
+  function fitTo(mode, clientY) {
     const rect = containerRef.current?.getBoundingClientRect();
     const v = currentView();
     if (!rect || !v) return;
@@ -961,12 +988,26 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
     const fitP = fitPageZoom(rect, dims);
     const fitW = Math.min(fitWidthZoom(rect, dims), MAX_ZOOM);
     const sceneY = (clientY - rect.top) / v.zoom - v.scrollY;
-    if (Math.abs(v.zoom - fitP) < 0.01 && fitW > fitP * 1.08) {
+    if (mode === 'width' && fitW > fitP * 1.08) {
       const scrollY = (clientY - rect.top) / fitW - sceneY;
       applyView({ zoom: fitW, ...clampView(rect.width / (2 * fitW) - dims.width / 2, scrollY, fitW, rect, dims, s.pageCount) });
     } else {
       applyView(viewForSheet(sheetAt(sceneY, s.pageCount, dims), fitP, rect, dims, s.pageCount));
     }
+  }
+
+  function toggleFit(clientY) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    const v = currentView();
+    if (!rect || !v) return;
+    const dims = sheetDims(settingsRef.current);
+    fitTo(Math.abs(v.zoom - fitPageZoom(rect, dims)) < 0.01 ? 'width' : 'page', clientY);
+  }
+
+  // The toolbar's "Fit width" / "Fit page" button.
+  function toggleFitWidth() {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect) fitTo(fitWidthRef.current ? 'page' : 'width', rect.top + rect.height / 2);
   }
 
   function handleTapForDoubleTap(e, track) {
@@ -1437,6 +1478,9 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
         onUndo={undo}
         onRedo={redo}
         onAddPage={() => addPage(currentSheetRef.current)}
+        canFitWidth={fitWidthState.can}
+        fitWidthActive={fitWidthState.active}
+        onToggleFitWidth={toggleFitWidth}
         inkFilter={inkFilter}
       />
       <div
@@ -1581,4 +1625,6 @@ export default function CanvasPage({ page, onChange, onSettingsChange }) {
       </div>
     </div>
   );
-}
+});
+
+export default CanvasPage;

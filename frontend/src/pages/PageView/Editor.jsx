@@ -51,14 +51,14 @@ async function uploadForPage(pageId, file) {
   }
 }
 
-// Wikilinks become plain [[Title]] text for Markdown export.
-function withPlainWikilinks(blocks, byId) {
+// Wikilinks become plain text for exports: [[Title]] (Markdown, plain text) or just Title.
+function withPlainWikilinks(blocks, byId, brackets = true) {
   const mapInline = (node) => {
     if (Array.isArray(node)) return node.map(mapInline);
     if (!node || typeof node !== 'object') return node;
     if (node.type === 'wikilink') {
       const title = byId[node.props?.pageId]?.title || node.props?.title || 'Untitled';
-      return { type: 'text', text: `[[${title}]]`, styles: {} };
+      return { type: 'text', text: brackets ? `[[${title}]]` : title, styles: {} };
     }
     const out = { ...node };
     if (out.content !== undefined) out.content = mapInline(out.content);
@@ -96,6 +96,9 @@ const Editor = forwardRef(function Editor({ page, onSave }, ref) {
 
   useImperativeHandle(ref, () => ({
     toMarkdown: () => editor.blocksToMarkdownLossy(withPlainWikilinks(editor.document, usePageIndex.getState().byId)),
+    // For export: the document as it is now, and as HTML.
+    getBlocks: () => editor.document,
+    toHTML: () => editor.blocksToHTMLLossy(withPlainWikilinks(editor.document, usePageIndex.getState().byId, false)),
     focus: () => editor.focus(),
     flush: saveNow,
   }));

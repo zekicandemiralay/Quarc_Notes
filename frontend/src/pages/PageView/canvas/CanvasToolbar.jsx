@@ -1,7 +1,9 @@
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PenLine, Highlighter, Undo2, Redo2, Shapes, Hand, Pointer, Settings2, FilePlus2, Check } from 'lucide-react';
+import { PenLine, Highlighter, Undo2, Redo2, Shapes, Hand, Pointer, Settings2, FilePlus2, Check, MoveHorizontal, Maximize } from 'lucide-react';
 import Popover from '../../../components/Popover';
+import ColorPicker from '../../../components/ColorPicker';
+import useSettings, { rememberColor, clearRecentColors } from '../../../store/settingsStore';
 import { PAGE_SIZES, PAGE_STYLES } from './notebook';
 
 export const PEN_COLORS = ['#1f2937', '#e03131', '#2f9e44', '#1971c2', '#f08c00', '#7048e8'];
@@ -37,36 +39,60 @@ function ToolButton({ active, onClick, title, children, className = '' }) {
 
 const Divider = ({ className = '' }) => <div className={`mx-1 h-6 w-px shrink-0 bg-neutral-300 dark:bg-neutral-700 ${className}`} />;
 
-function Swatches({ colors, active, drawMode, isHl, onPick, inkFilter, wrap = false }) {
+const NO_COLORS = [];
+const INLINE_RECENT = 4; // recent colours shown right in the toolbar (all of them are in the picker)
+
+function Swatches({ colors, active, drawMode, isHl, onPick, inkFilter, wrap = false, inline = false }) {
   const { t } = useTranslation();
-  const custom = !colors.includes(active.color);
+  const kind = isHl ? 'hl' : 'pen';
+  const recent = useSettings((s) => s.recentColors?.[kind]) || NO_COLORS;
+  const [open, setOpen] = useState(false);
+  const btn = useRef(null);
   const ring = (on) => (on ? 'ring-accent' : 'ring-transparent hover:ring-neutral-300');
+  const shown = [...colors, ...recent.filter((c) => !colors.includes(c)).slice(0, INLINE_RECENT)];
+  const custom = !shown.includes(active.color);
+
+  const pickCustom = (hex) => {
+    rememberColor(kind, hex, colors);
+    onPick({ color: hex });
+  };
+  const picker = (
+    <ColorPicker color={active.color} onPick={pickCustom} recent={recent} onClear={() => clearRecentColors(kind)} inkFilter={inkFilter} />
+  );
+
   return (
-    <div className={`flex shrink-0 items-center ${wrap ? 'flex-wrap gap-2' : 'gap-1'}`} style={{ filter: inkFilter }}>
-      {colors.map((c) => (
+    <>
+      <div className={`flex shrink-0 items-center ${wrap ? 'flex-wrap gap-2' : 'gap-1'}`}>
+        {shown.map((c) => (
+          <button
+            key={c}
+            type="button"
+            title={c}
+            aria-label={c}
+            onClick={() => onPick({ color: c })}
+            className={`h-7 w-7 shrink-0 rounded-full ring-2 ring-offset-2 ring-offset-white transition dark:ring-offset-neutral-900 ${ring(drawMode && active.color === c)}`}
+            style={{ backgroundColor: c, opacity: isHl ? 0.85 : 1, filter: inkFilter }}
+          />
+        ))}
         <button
-          key={c}
+          ref={btn}
           type="button"
-          title={c}
-          aria-label={c}
-          onClick={() => onPick({ color: c })}
-          className={`h-7 w-7 shrink-0 rounded-full ring-2 ring-offset-2 ring-offset-white transition dark:ring-offset-neutral-900 ${ring(drawMode && active.color === c)}`}
-          style={{ backgroundColor: c, opacity: isHl ? 0.85 : 1 }}
+          title={t('canvas.customColor')}
+          aria-label={t('canvas.customColor')}
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className={`h-7 w-7 shrink-0 rounded-full ring-2 ring-offset-2 ring-offset-white transition dark:ring-offset-neutral-900 ${ring((custom && drawMode) || open)}`}
+          style={custom ? { backgroundColor: active.color, filter: inkFilter } : { background: 'conic-gradient(#f03e3e, #fab005, #40c057, #15aabf, #4c6ef5, #be4bdb, #f03e3e)' }}
         />
-      ))}
-      <label
-        title={t('canvas.customColor')}
-        className={`relative flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full ring-2 ring-offset-2 ring-offset-white dark:ring-offset-neutral-900 ${ring(custom && drawMode)}`}
-        style={{ background: custom ? active.color : 'conic-gradient(#f03e3e, #fab005, #40c057, #15aabf, #4c6ef5, #be4bdb, #f03e3e)' }}
-      >
-        <input
-          type="color"
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          value={/^#[0-9a-f]{6}$/i.test(active.color) ? active.color : '#000000'}
-          onChange={(e) => onPick({ color: e.target.value })}
-        />
-      </label>
-    </div>
+      </div>
+      {inline ? (
+        open && <div className="rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900/60">{picker}</div>
+      ) : (
+        <Popover anchorRef={btn} open={open} onClose={() => setOpen(false)} className="w-[17.5rem] p-3">
+          {picker}
+        </Popover>
+      )}
+    </>
   );
 }
 
@@ -127,6 +153,9 @@ export default function CanvasToolbar({
   onUndo,
   onRedo,
   onAddPage,
+  canFitWidth,
+  fitWidthActive,
+  onToggleFitWidth,
   inkFilter,
 }) {
   const { t } = useTranslation();
@@ -172,7 +201,7 @@ export default function CanvasToolbar({
       </span>
       <Popover anchorRef={penBtn} open={penMenu} onClose={() => setPenMenu(false)} className="w-64 p-3">
         <div className="flex flex-col gap-3">
-          <Swatches colors={colors} {...common} wrap />
+          <Swatches colors={colors} {...common} wrap inline />
           <Sizes sizes={sizes} {...common} />
         </div>
       </Popover>
@@ -195,6 +224,12 @@ export default function CanvasToolbar({
         {fingerDraws ? <Pointer size={18} /> : <Hand size={18} />}
         <span className="hidden lg:inline">{fingerDraws ? t('canvas.fingerDrawsShort') : t('canvas.fingerScrollsShort')}</span>
       </ToolButton>
+      {canFitWidth && (
+        <ToolButton active={fitWidthActive} onClick={onToggleFitWidth} title={fitWidthActive ? t('canvas.fitPage') : t('canvas.fitWidth')}>
+          {fitWidthActive ? <Maximize size={18} /> : <MoveHorizontal size={18} />}
+          <span className="hidden lg:inline">{fitWidthActive ? t('canvas.fitPage') : t('canvas.fitWidth')}</span>
+        </ToolButton>
+      )}
       <span ref={pageBtn} className="shrink-0">
         <ToolButton active={pageMenu} onClick={() => setPageMenu((v) => !v)} title={t('canvas.pageSettings')}>
           <Settings2 size={18} />

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Star, Menu, ChevronRight, Copy, Download, SmilePlus, RotateCcw, Trash2 } from 'lucide-react';
+import { Star, Menu, ChevronRight, Copy, Download, SmilePlus, RotateCcw, Trash2, MoveHorizontal, Check } from 'lucide-react';
 import { getPage, updatePage, setFavorite, restorePage, purgePage } from '../../lib/api';
 import { usePageIndex, ancestorsOf } from '../../lib/pageIndex';
 import { on } from '../../lib/events';
@@ -10,6 +10,8 @@ import { relativeTime } from '../../lib/time';
 import PageActions from '../../components/PageActions';
 import PageIcon from '../../components/PageIcon';
 import IconPicker from '../../components/IconPicker';
+import ExportDialog from '../../components/ExportDialog';
+import useSettings from '../../store/settingsStore';
 import { MenuItem } from '../../components/Popover';
 import { toast } from '../../components/Toasts';
 import BacklinksPanel from './BacklinksPanel';
@@ -24,17 +26,6 @@ function Spinner() {
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-300 border-t-accent" />
     </div>
   );
-}
-
-function download(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function Breadcrumbs({ id }) {
@@ -73,6 +64,9 @@ export default function PageView() {
   const titleFocused = useRef(false);
   const titleTimer = useRef(null);
   const editorRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [exporting, setExporting] = useState(false);
+  const defaultFullWidth = useSettings((st) => st.fullWidth);
 
   const load = useCallback(async () => {
     const p = await getPage(id);
@@ -94,7 +88,15 @@ export default function PageView() {
     });
     // A page opened from a link before the first sync brought it down.
     return on('pages-changed', (ids) => {
-      if (ids.includes(id) && !pageRef.current) load();
+      if (!ids.includes(id)) return;
+      if (!pageRef.current) {
+        load();
+        return;
+      }
+      // "Full width" changed on another device.
+      if (pageRef.current.type !== 'canvas') {
+        getPage(id).then((p) => p && setPage((prev) => (prev && prev.id === p.id ? { ...prev, canvas_settings: p.canvas_settings } : prev)));
+      }
     });
   }, [id, load, collapseForCanvas]);
 
@@ -151,35 +153,68 @@ export default function PageView() {
   const isCanvas = page.type === 'canvas';
   const edited = current.updated_at ? relativeTime(current.updated_at, i18n.language) : '';
 
-  const exportItems = isCanvas
-    ? null
-    : (close) => (
-        <>
-          <MenuItem
-            icon={Copy}
-            onClick={async () => {
-              close();
-              try {
-                await navigator.clipboard.writeText(editorRef.current?.toMarkdown() || '');
-                toast(t('page.copiedMarkdown'));
-              } catch {
-                toast(t('page.copyFailed'));
-              }
-            }}
-          >
-            {t('page.copyMarkdown')}
-          </MenuItem>
-          <MenuItem
-            icon={Download}
-            onClick={() => {
-              close();
-              download(`${(title || t('page.untitled')).replace(/[\\/:*?"<>|]+/g, '_')}.md`, editorRef.current?.toMarkdown() || '');
-            }}
-          >
-            {t('page.downloadMarkdown')}
-          </MenuItem>
-        </>
-      );
+  // "Full width" is kept per page (like Notion) in the page's settings; until
+  // a page has its own choice it follows the device default from Settings.
+  const fullWidth = page.canvas_settings?.fullWidth ?? defaultFullWidth;
+  function toggleFullWidth() {
+    const settings = { ...(page.canvas_settings || {}), fullWidth: !fullWidth };
+    setPage((p) => ({ ...p, canvas_settings: settings }));
+    updatePage(id, { canvas_settings: settings });
+  }
+
+  const pageMenuItems = (close) => (
+    <>
+      {!isCanvas && (
+        <MenuItem
+          icon={MoveHorizontal}
+          hint={fullWidth ? <Check size={14} className="text-accent-dark" /> : null}
+          onClick={() => {
+            close();
+            toggleFullWidth();
+          }}
+        >
+          {t('page.fullWidth')}
+        </MenuItem>
+      )}
+      <MenuItem
+        icon={Download}
+        onClick={() => {
+          close();
+          setExporting(true);
+        }}
+      >
+        {t('page.export')}
+      </MenuItem>
+      {!isCanvas && (
+        <MenuItem
+          icon={Copy}
+          onClick={async () => {
+            close();
+            try {
+              await navigator.clipboard.writeText(editorRef.current?.toMarkdown() || '');
+              toast(t('page.copiedMarkdown'));
+            } catch {
+              toast(t('page.copyFailed'));
+            }
+          }}
+        >
+          {t('page.copyMarkdown')}
+        </MenuItem>
+      )}
+    </>
+  );
+
+  const exportDialog = (
+    <ExportDialog
+      open={exporting}
+      onClose={() => setExporting(false)}
+      kind={isCanvas ? 'canvas' : 'doc'}
+      title={title}
+      icon={current.icon}
+      getDoc={() => editorRef.current}
+      getNotebook={async () => canvasRef.current?.getExportData()}
+    />
+  );
 
   const header = (
     <div className="flex h-12 shrink-0 items-center gap-2 px-3">
@@ -227,7 +262,7 @@ export default function PageView() {
       >
         <Star size={18} fill={current.is_favorite ? 'currentColor' : 'none'} />
       </button>
-      <PageActions page={current} extra={exportItems} iconSize={18} />
+      <PageActions page={current} extra={pageMenuItems} iconSize={18} />
     </div>
   );
 
@@ -262,10 +297,11 @@ export default function PageView() {
         {trashBanner}
         <div className="min-h-0 flex-1">
           <Suspense fallback={<Spinner />}>
-            <CanvasPage key={page.id} page={page} onChange={handleInkSave} onSettingsChange={handleSettingsChange} />
+            <CanvasPage ref={canvasRef} key={page.id} page={page} onChange={handleInkSave} onSettingsChange={handleSettingsChange} />
           </Suspense>
         </div>
         {iconPicker}
+        {exportDialog}
       </div>
     );
   }
@@ -275,7 +311,7 @@ export default function PageView() {
       <div className="sticky top-0 z-10 bg-white/85 backdrop-blur dark:bg-neutral-900/85">{header}</div>
       {trashBanner}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl px-4 pb-24 pt-6 sm:px-12 sm:pt-10">
+        <div className={`mx-auto w-full px-4 pb-24 pt-6 sm:pt-10 ${fullWidth ? 'max-w-none sm:px-10 lg:px-16' : 'max-w-3xl sm:px-12'}`}>
           <div className="group mb-2 px-[54px] max-sm:px-3">
             <span ref={iconBtn} className="inline-block">
               {current.icon ? (
@@ -323,6 +359,7 @@ export default function PageView() {
         </div>
       </div>
       {iconPicker}
+      {exportDialog}
     </div>
   );
 }

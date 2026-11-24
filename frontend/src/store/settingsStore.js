@@ -11,6 +11,10 @@ const DEFAULTS = {
   penSeen: false, // a stylus has been used on this device
   shapeSnap: true, // hold the pen still at the end of a stroke to turn it into a clean shape
   paperFollowsTheme: true, // dark paper in dark mode (otherwise always light paper)
+  recentColors: { pen: [], hl: [] }, // custom pen / highlighter colours picked on this device, newest first
+  fullWidth: false, // documents use the whole window width (a page can override this)
+  exportPaper: typeof navigator !== 'undefined' && /^en-(US|CA)/i.test(navigator.language || '') ? 'Letter' : 'A4', // PDF paper size for documents
+  exportPaperLines: true, // notebook exports keep the paper's lines / grid
 };
 
 function load() {
@@ -55,6 +59,23 @@ const useSettings = create((set, get) => ({
 media?.addEventListener?.('change', () => {
   if (useSettings.getState().theme === 'system') applyTheme('system');
 });
+
+// Remembers a picked colour (newest first, no duplicates) for the pen or the
+// highlighter. Colours that are already in the toolbar's fixed palette are
+// passed in `skip` and not stored.
+export const MAX_RECENT_COLORS = 12;
+export function rememberColor(kind, hex, skip = []) {
+  const c = String(hex || '').toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(c) || skip.includes(c)) return;
+  const all = useSettings.getState().recentColors || {};
+  const list = [c, ...(all[kind] || []).filter((x) => x !== c)].slice(0, MAX_RECENT_COLORS);
+  useSettings.getState().update({ recentColors: { ...all, [kind]: list } });
+}
+
+export function clearRecentColors(kind) {
+  const all = useSettings.getState().recentColors || {};
+  useSettings.getState().update({ recentColors: { ...all, [kind]: [] } });
+}
 
 export const useIsDark = () => useSettings((s) => s.isDark);
 

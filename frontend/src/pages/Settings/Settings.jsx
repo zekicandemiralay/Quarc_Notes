@@ -229,6 +229,12 @@ export default function Settings() {
         </Row>
       </Section>
 
+      <Section title={t('sidebar.pages')}>
+        <Row label={t('settings.fullWidthPages')} hint={t('settings.fullWidthPagesHint')}>
+          <Toggle checked={prefs.fullWidth} onChange={(v) => prefs.update({ fullWidth: v })} label={t('settings.fullWidthPages')} />
+        </Row>
+      </Section>
+
       <Section title={t('settings.handwriting')}>
         <Row label={t('settings.finger')} hint={t('settings.fingerHint')}>
           <Segmented

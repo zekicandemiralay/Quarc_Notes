@@ -1,0 +1,16 @@
+{
+  "identifier": "export-files",
+  "description": "Export a page as PDF, Markdown, ...: the window shows a page from the Quarc server, so (like the sign-in commands) the native Save-as dialog and writing the file the person picked are allowed for that address only. The dialog adds the chosen path to the file scope, nothing else is writable.",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "https://quarcnet0.tail84500c.ts.net:4001/*"
+    ]
+  },
+  "permissions": [
+    "dialog:allow-save",
+    "fs:allow-write-file"
+  ]
+}

@@ -6,14 +6,15 @@ backlinks, and a drawing canvas — synced across every device, offline-friendly
 the **same login as Quarc Music** (and every other Quarc app).
 
 **Features:**
-- **Pages** — a Notion-style block editor (headings, lists, checklists, tables, code, images with upload), nested pages, emoji icons, favorites, duplicate, move, Markdown export
+- **Pages** — a Notion-style block editor (headings, lists, checklists, tables, code, images with upload), nested pages, emoji icons, favorites, duplicate, move; **full width** (per page, or by default on a device) for big screens
 - **Links** — type `[` to link another page (or create one on the spot); links follow renames, and every page shows its "Linked mentions" (works offline)
 - **Notebooks** — pressure-sensitive handwriting for stylus input (S-Pen, Apple Pencil, Wacom):
   - multi-page notebooks (A5/A4/Letter, portrait/landscape, lined/squared/dotted/blank paper) with a page navigator, add/insert/delete page
   - **hold to snap**: keep the pen still at the end of a stroke and it becomes a clean straight line, arc, L-shape, circle/ellipse, rectangle/square, triangle, diamond or polygon — keep holding to move/resize/rotate it into place; afterwards it stays an editable shape
-  - pen + highlighter (drawn under the ink), custom colours, stylus button/eraser end erases, undo/redo (also two-finger tap)
-  - palm rejection; fingers scroll (with momentum) once a stylus is used, or draw on phones; pinch to zoom, double-tap to fit
+  - pen + highlighter (drawn under the ink); **colour wheel** with brightness bar, hex field and a history of recently used colours; stylus button/eraser end erases, undo/redo (also two-finger tap)
+  - palm rejection; fingers scroll (with momentum) once a stylus is used, or draw on phones; pinch to zoom, double-tap or the **Fit width** button to fit
   - cut-selection (rectangle / free-form) that really cuts through strokes, plus all Excalidraw shapes and text
+- **Export** — from a page's ⋯ menu: documents as **PDF** (real text, A4/Letter), **Markdown** (a zip with an `assets/` folder when the page has images), **HTML** (one self-contained file) or plain text; notebooks as **PDF** (one page per sheet), **PNG**, **SVG** or an editable **.excalidraw** file. Saved as a download in the browser, with a Save-as dialog on desktop and the share sheet on Android
 - **Dark mode** — light / dark / follow system, including dark paper for notebooks
 - **Search** — Ctrl/⌘ K quick switcher and full-text search across pages, tables and text in drawings
 - **Offline-first sync** — everything works offline and syncs when back online; edits from two devices never get lost (drawings merge stroke by stroke, a document edited on both keeps both versions)
@@ -114,7 +115,7 @@ Log in with the same username/password you use for Quarc Music — it's the same
 
 ```bash
 cd backend && npm install && npm test     # API + sync tests (temporary SQLite database)
-cd frontend && npm install && npm test    # hold-to-snap shape recognition tests
+cd frontend && npm install && npm test    # shape recognition, cut selection, colours, export (PDF/zip) tests
 cd frontend && npm run dev                # dev server; proxies /api/auth to :3902 (quarc-auth) and /api to :3903
 ```
 
