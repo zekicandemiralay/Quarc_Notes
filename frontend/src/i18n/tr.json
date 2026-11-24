@@ -119,6 +119,7 @@
   "export": {
     "title": "Dışa aktar",
     "pdfDocHint": "Seçilebilir metinli belge; yazdırmaya veya paylaşmaya hazır",
+    "docxHint": "Word, Google Docs ve LibreOffice'te açılır",
     "mdHint": "Biçimli düz metin; görselli sayfalar zip olarak gelir",
     "htmlHint": "Her yerde açılan bir web sayfası, görseller dahil",
     "txt": "Düz metin",
@@ -132,7 +133,7 @@
     "failed": "Bu sayfa dışa aktarılamadı",
     "working": "Sayfa {{progress}}…",
     "paperLines": "Kağıdın çizgilerini ekle",
-    "paperSize": "PDF kağıt boyutu"
+    "paperSize": "Kağıt boyutu (PDF ve Word)"
   },
   "search": {
     "placeholder": "Notlarınızda arayın…",

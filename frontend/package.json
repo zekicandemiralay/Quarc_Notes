@@ -16,6 +16,7 @@
     "@excalidraw/excalidraw": "^0.18.1",
     "dexie": "^4.0.8",
     "dexie-react-hooks": "^1.1.7",
+    "docx": "^9.16.0",
     "i18next": "^23.11.5",
     "lucide-react": "^0.460.0",
     "pdfmake": "^0.3.15",

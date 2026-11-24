@@ -1,4 +1,4 @@
-// A document -> PDF / Markdown / HTML / plain text.
+// A document -> PDF / Word / Markdown / HTML / plain text.
 //
 //   doc = { getBlocks(), toMarkdown(), toHTML() }   (the editor's export API)
 //   -> { blob, ext }
@@ -59,6 +59,14 @@ export async function exportDocument(format, { title, icon, doc, byId = {}, opti
     const iconImage = icon && hasEmoji(icon) ? emojiToPng(icon) : null;
     const definition = docToPdfDefinition(blocks, { title: heading, paper: options.paper, byId, origin, images, iconImage, untitled, author });
     return { blob: await pdfBlob(definition), ext: 'pdf' };
+  }
+
+  if (format === 'docx') {
+    const blocks = doc.getBlocks();
+    const images = await imagesForPdf(imageUrls(blocks));
+    const [{ buildDocx }, { Packer }] = await Promise.all([import('./docToDocx'), import('docx')]);
+    const document = buildDocx(blocks, { title: heading, icon, paper: options.paper, byId, origin, images, untitled, lang, author });
+    return { blob: await Packer.toBlob(document), ext: 'docx' };
   }
 
   if (format === 'txt') {

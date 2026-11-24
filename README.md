@@ -14,7 +14,7 @@ the **same login as Quarc Music** (and every other Quarc app).
   - pen + highlighter (drawn under the ink); **colour wheel** with brightness bar, hex field and a history of recently used colours; stylus button/eraser end erases, undo/redo (also two-finger tap)
   - palm rejection; fingers scroll (with momentum) once a stylus is used, or draw on phones; pinch to zoom, double-tap or the **Fit width** button to fit
   - cut-selection (rectangle / free-form) that really cuts through strokes, plus all Excalidraw shapes and text
-- **Export** — from a page's ⋯ menu: documents as **PDF** (real text, A4/Letter), **Markdown** (a zip with an `assets/` folder when the page has images), **HTML** (one self-contained file) or plain text; notebooks as **PDF** (one page per sheet), **PNG**, **SVG** or an editable **.excalidraw** file. Saved as a download in the browser, with a Save-as dialog on desktop and the share sheet on Android
+- **Export** — from a page's ⋯ menu: documents as **PDF** (real text, A4/Letter), **Word (.docx)**, **Markdown** (a zip with an `assets/` folder when the page has images), **HTML** (one self-contained file) or plain text; notebooks as **PDF** (one page per sheet), **PNG**, **SVG** or an editable **.excalidraw** file. Saved as a download in the browser, with a Save-as dialog on desktop and the share sheet on Android
 - **Dark mode** — light / dark / follow system, including dark paper for notebooks
 - **Search** — Ctrl/⌘ K quick switcher and full-text search across pages, tables and text in drawings
 - **Offline-first sync** — everything works offline and syncs when back online; edits from two devices never get lost (drawings merge stroke by stroke, a document edited on both keeps both versions)

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, FileCode, FileJson, Globe, AlignLeft, Image as ImageIcon, PenTool, Loader2, Check } from 'lucide-react';
+import { FileText, FileType, FileCode, FileJson, Globe, AlignLeft, Image as ImageIcon, PenTool, Loader2, Check } from 'lucide-react';
 import Modal from './Modal';
 import { toast } from './Toasts';
 import useSettings from '../store/settingsStore';
@@ -18,6 +18,7 @@ import { API_BASE } from '../lib/apiUrl';
 
 const DOC_FORMATS = [
   { id: 'pdf', icon: FileText, label: 'PDF', hint: 'export.pdfDocHint' },
+  { id: 'docx', icon: FileType, label: 'Word', hint: 'export.docxHint' },
   { id: 'md', icon: FileCode, label: 'Markdown', hint: 'export.mdHint' },
   { id: 'html', icon: Globe, label: 'HTML', hint: 'export.htmlHint' },
   { id: 'txt', icon: AlignLeft, label: 'export.txt', hint: 'export.txtHint' },

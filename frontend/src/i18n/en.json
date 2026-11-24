@@ -119,6 +119,7 @@
   "export": {
     "title": "Export",
     "pdfDocHint": "A document with selectable text, ready to print or share",
+    "docxHint": "Opens in Word, Google Docs and LibreOffice",
     "mdHint": "Formatted plain text; pages with images come as a zip",
     "htmlHint": "A web page that opens anywhere, images included",
     "txt": "Plain text",
@@ -132,7 +133,7 @@
     "failed": "Couldn't export this page",
     "working": "Page {{progress}}…",
     "paperLines": "Include the paper's lines",
-    "paperSize": "PDF paper size"
+    "paperSize": "Paper size (PDF and Word)"
   },
   "search": {
     "placeholder": "Search your notes…",
