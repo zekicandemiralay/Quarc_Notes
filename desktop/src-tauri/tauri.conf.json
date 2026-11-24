@@ -28,12 +28,13 @@
         "label": "main",
         "title": "Quarc Notes",
         "url": "https://quarcnet0.tail84500c.ts.net:4001",
-        "width": 1280,
-        "height": 800,
+        "width": 1100,
+        "height": 650,
         "minWidth": 900,
-        "minHeight": 600,
+        "minHeight": 520,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "maximized": true
       }
     ],
     "security": {
