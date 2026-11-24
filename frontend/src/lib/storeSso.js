@@ -1,5 +1,6 @@
-// Quarc Store single sign-on — the web side (Android app only; a no-op on
-// the web and desktop). Source of truth: Quarc_Store/sso-kit/web/storeSso.js
+// Quarc Store single sign-on — the web side. Works in the Android app (Capacitor plugin) and in the
+// Windows desktop app (Tauri commands, sso-kit/desktop/); a no-op in a browser.
+// Source of truth: Quarc_Store/sso-kit/web/storeSso.js
 //
 // Wiring (see Quarc_Store/sso-kit/README.md):
 //   - authStore.checkSession(): `await syncFromStore();` before GET /api/auth/me
@@ -8,7 +9,25 @@
 
 import { API_BASE } from './apiUrl';
 
-const plugin = () => (window?.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.QuarcSso ?? null : null);
+const androidPlugin = () => (window?.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.QuarcSso ?? null : null);
+
+// The Windows app: the same four calls as the Android plugin, answered by quarc_sso.rs. An app version
+// from before this existed has no such commands; the calls then fail and the callers treat that as
+// "the Store isn't available", exactly like an Android phone without the Store.
+const desktopPlugin = () => {
+  const invoke = window?.__TAURI__?.core?.invoke;
+  if (!invoke) return null;
+  return {
+    sync: ({ serverOrigin, force }) => invoke('quarc_sso_sync', { serverOrigin, force }),
+    peek: () => invoke('quarc_sso_peek'),
+    openStore: ({ target }) => invoke('quarc_sso_open_store', { target }),
+  };
+};
+
+const plugin = () => androidPlugin() || desktopPlugin();
+
+/** The origin of the Quarc server: baked into the Android build, the page's own origin in the desktop app. */
+const serverOrigin = () => API_BASE || (desktopPlugin() ? window.location.origin : '');
 
 function withTimeout(promise, ms, fallback) {
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), ms))]);
@@ -21,9 +40,10 @@ function withTimeout(promise, ms, fallback) {
  */
 export async function syncFromStore({ force = false } = {}) {
   const p = plugin();
-  if (!p || !API_BASE) return { result: 'unavailable' };
+  const origin = serverOrigin();
+  if (!p || !origin) return { result: 'unavailable' };
   try {
-    return await withTimeout(p.sync({ serverOrigin: API_BASE, force }), force ? 15000 : 4000, { result: 'timeout' });
+    return await withTimeout(p.sync({ serverOrigin: origin, force }), force ? 15000 : 4000, { result: 'timeout' });
   } catch {
     return { result: 'error' };
   }
@@ -77,11 +97,13 @@ const STORE_PROMO_UNTIL = {
   'com.quarc.weather': '1.0.19', //   1.0.9  – 1.0.18
   'com.quarc.translate': '1.0.12', // 1.0.2  – 1.0.11
   'com.quarc.calendar': '1.0.12', //  1.0.2  – 1.0.11
+  'com.quarc.sport': '1.0.10', //     1.0.0  – 1.0.9  (Quarc Sport)
+  'com.quarc.reader': '1.0.10', //    1.0.0  – 1.0.9  (Quarc Reader)
 };
 
 /** Android app, Quarc Store not installed, and still within the promo releases? */
 export async function shouldPromoteStore() {
-  if (!plugin()) return false;
+  if (!androidPlugin()) return false;
   const store = await peekStore();
   if (store.installed) return false;
   const info = await window.Capacitor.Plugins.App?.getInfo?.().catch(() => null);
@@ -92,7 +114,7 @@ export async function shouldPromoteStore() {
 /** Opens the Quarc Store APK download in the browser. */
 export async function openStoreDownload() {
   try {
-    await plugin()?.openUrl({ url: STORE_DOWNLOAD_URL });
+    await androidPlugin()?.openUrl({ url: STORE_DOWNLOAD_URL });
   } catch {
     /* no browser — nothing more we can do */
   }
@@ -105,7 +127,7 @@ export async function openStoreDownload() {
  * Store isn't available — fall back to the app's own updater.
  */
 export async function updateViaStore() {
-  if (!plugin()) return false;
+  if (!androidPlugin()) return false;
   const info = await window.Capacitor.Plugins.App?.getInfo?.().catch(() => null);
   return info?.id ? openStore(`app/${info.id}`) : false;
 }
@@ -141,13 +163,20 @@ let watching = false;
 /**
  * Re-checks the Store whenever the app comes back to the foreground, so
  * signing in/out in the Store takes effect as soon as the user switches back.
+ * (Android: the app resumes. Windows: the window gets focus.)
  */
 export function watchStoreSession(onChange) {
-  const app = window?.Capacitor?.Plugins?.App;
-  if (!plugin() || !app || watching) return;
-  watching = true;
-  app.addListener('resume', async () => {
+  if (watching) return;
+  const recheck = async () => {
     const r = await syncFromStore();
     if (r.result === 'signed_in' || r.result === 'signed_out') onChange(r);
-  });
+  };
+  const app = window?.Capacitor?.Plugins?.App;
+  if (androidPlugin() && app) {
+    watching = true;
+    app.addListener('resume', recheck);
+  } else if (desktopPlugin()) {
+    watching = true;
+    window.addEventListener('focus', recheck);
+  }
 }

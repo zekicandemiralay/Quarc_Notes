@@ -4,6 +4,7 @@
 //   Android app: "Continue as ⟨you⟩" (Quarc Store signed in on this phone)
 //                or "Sign in with Quarc Store"; nothing if the Store isn't
 //                installed.
+//   Windows app: the same, with Quarc Store on this PC — and also:
 //   Web/desktop: "Sign in with your phone" — type the shown number into
 //                Quarc Store on your phone and this computer is signed in.
 //
@@ -18,6 +19,7 @@ const TEXT = {
     continueAs: 'Continue as {{name}}',
     signInWithStore: 'Sign in with Quarc Store',
     signedInHint: 'Signed in to Quarc Store on this phone',
+    signedInHintPc: 'Signed in to Quarc Store on this PC',
     openHint: 'Opens Quarc Store, then brings you back here',
     failed: "Quarc Store couldn't sign you in right now. Try again, or use your password below.",
     or: 'or',
@@ -36,6 +38,7 @@ const TEXT = {
     continueAs: '{{name}} olarak devam et',
     signInWithStore: 'Quarc Store ile giriş yap',
     signedInHint: 'Bu telefonda Quarc Store’a giriş yapılmış',
+    signedInHintPc: 'Bu bilgisayarda Quarc Store’a giriş yapılmış',
     openHint: 'Quarc Store’u açar, sonra seni buraya geri getirir',
     failed: 'Quarc Store şu anda giriş yapamadı. Tekrar dene ya da aşağıdan şifrenle giriş yap.',
     or: 'veya',
@@ -59,6 +62,7 @@ function tx(key, vars = {}) {
 }
 
 const isAndroidApp = () => !!window?.Capacitor?.isNativePlatform?.();
+const isDesktopApp = () => !!(window?.__TAURI_INTERNALS__ || window?.__TAURI__);
 
 function Divider() {
   return (
@@ -82,9 +86,9 @@ function StoreIcon() {
 const primary =
   'flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50';
 
-// ── Android app: use the Store on this phone ───────────────────────────────
+// ── Android / Windows app: use the Store on this phone / PC ────────────────
 
-function OnThisPhone({ onSignedIn }) {
+function OnThisDevice({ onSignedIn }) {
   const [store, setStore] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -119,7 +123,7 @@ function OnThisPhone({ onSignedIn }) {
         <StoreIcon />
         {busy ? '…' : signedIn ? tx('continueAs', { name: store.user.username }) : tx('signInWithStore')}
       </button>
-      <p className="mt-1.5 text-center text-xs text-zinc-500">{signedIn ? tx('signedInHint') : tx('openHint')}</p>
+      <p className="mt-1.5 text-center text-xs text-zinc-500">{signedIn ? tx(isDesktopApp() ? 'signedInHintPc' : 'signedInHint') : tx('openHint')}</p>
       {error && <p className="mt-2 rounded-lg bg-red-400/10 px-3 py-2 text-sm text-red-400">{error}</p>}
       <Divider />
     </div>
@@ -244,5 +248,10 @@ function WithYourPhone({ onSignedIn }) {
 }
 
 export default function StoreLoginButton({ onSignedIn }) {
-  return isAndroidApp() ? <OnThisPhone onSignedIn={onSignedIn} /> : <WithYourPhone onSignedIn={onSignedIn} />;
+  return (
+    <>
+      {(isAndroidApp() || isDesktopApp()) && <OnThisDevice onSignedIn={onSignedIn} />}
+      {!isAndroidApp() && <WithYourPhone onSignedIn={onSignedIn} />}
+    </>
+  );
 }
