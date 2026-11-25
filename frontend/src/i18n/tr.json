@@ -160,9 +160,14 @@
     "tipShapes": "Defterde bir çizginin sonunda kalemi sabit tutun: düzgün bir çizgiye, daireye veya şekle dönüşür — basılı tutarak taşıyabilirsiniz.",
     "tipGestures": "Defterler: iki parmakla yakınlaştırın, iki parmakla dokunarak geri alın, çift dokunarak sayfayı sığdırın."
   },
+  "confirm": {
+    "cancel": "Vazgeç",
+    "delete": "Sil"
+  },
   "trash": {
     "empty": "Çöp kutusunu boşalt",
-    "emptyConfirm": "Çöp kutusundaki {{count}} sayfanın tamamı kalıcı olarak silinsin mi?",
+    "emptyConfirm_one": "Çöp kutusundaki sayfa kalıcı olarak silinsin mi? Bu işlem geri alınamaz.",
+    "emptyConfirm_other": "Çöp kutusundaki {{count}} sayfanın tamamı kalıcı olarak silinsin mi? Bu işlem geri alınamaz.",
     "nothing": "Çöp kutusu boş.",
     "deletedWhen": "{{when}} silindi",
     "withSubpages_one": "{{count}} alt sayfayla",

@@ -18,6 +18,7 @@ import { db } from '../../lib/db';
 import { on } from '../../lib/events';
 import useSettings from '../../store/settingsStore';
 import Popover, { MenuItem, MenuSeparator } from '../../components/Popover';
+import { askConfirm } from '../../components/ConfirmDialog';
 import CanvasToolbar from './canvas/CanvasToolbar';
 import { clipPolylineByPolygon, boundingBoxIntersectsPolygon, getCuttableOutline, cutOutline, pinCutJoints } from './canvas/selectionCut';
 import { shapeToElements, inkWidth, eraserHits, EXCALIDRAW_FREEDRAW_SIZE_FACTOR } from './canvas/elements';
@@ -487,17 +488,31 @@ const CanvasPage = forwardRef(function CanvasPage({ page, onChange, onSettingsCh
     requestAnimationFrame(() => applyView(viewForSheet(after + 1, zoom, sizeRef.current, dims, n + 1)));
   }
 
-  function deletePage(i) {
+  function sheetSpan(i, s) {
+    const dims = sheetDims(s);
+    const top = sheetTop(i, dims) - PAGE_GAP / 2;
+    return { dims, top, bottom: top + dims.height + PAGE_GAP };
+  }
+
+  async function deletePage(i) {
+    const api = apiRef.current;
+    if (!api) return;
+    const { top, bottom } = sheetSpan(i, settingsRef.current);
+    const onPage = api
+      .getSceneElementsIncludingDeleted()
+      .filter((el) => !el.isDeleted && el.y + el.height / 2 >= top && el.y + el.height / 2 < bottom);
+    if (onPage.length && !(await askConfirm(t('canvas.deletePageConfirm', { n: i + 1 })))) return;
+    removeSheet(i);
+  }
+
+  // Reads the scene and settings afresh: they may have changed while the question was open.
+  function removeSheet(i) {
     const api = apiRef.current;
     if (!api) return;
     const s = settingsRef.current;
-    const dims = sheetDims(s);
-    const top = sheetTop(i, dims) - PAGE_GAP / 2;
-    const bottom = top + dims.height + PAGE_GAP;
+    const { dims, top, bottom } = sheetSpan(i, s);
     const dy = dims.height + PAGE_GAP;
     const all = api.getSceneElementsIncludingDeleted();
-    const onPage = all.filter((el) => !el.isDeleted && el.y + el.height / 2 >= top && el.y + el.height / 2 < bottom);
-    if (onPage.length && !window.confirm(t('canvas.deletePageConfirm', { n: i + 1 }))) return;
     const lastSheet = s.pageCount === 1;
     const elements = all.map((el) => {
       if (el.isDeleted) return el;

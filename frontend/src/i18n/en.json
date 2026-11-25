@@ -160,9 +160,14 @@
     "tipShapes": "In a notebook, hold the pen still at the end of a stroke to snap it into a clean line, circle or shape — keep holding to move it.",
     "tipGestures": "Notebooks: two fingers pinch to zoom, a two-finger tap undoes, double-tap fits the page."
   },
+  "confirm": {
+    "cancel": "Cancel",
+    "delete": "Delete"
+  },
   "trash": {
     "empty": "Empty trash",
-    "emptyConfirm": "Delete all {{count}} pages in the trash forever?",
+    "emptyConfirm_one": "Delete the page in the trash forever? This can't be undone.",
+    "emptyConfirm_other": "Delete all {{count}} pages in the trash forever? This can't be undone.",
     "nothing": "The trash is empty.",
     "deletedWhen": "Deleted {{when}}",
     "withSubpages_one": "with {{count}} sub-page",

@@ -14,6 +14,7 @@ import ExportDialog from '../../components/ExportDialog';
 import useSettings from '../../store/settingsStore';
 import { MenuItem } from '../../components/Popover';
 import { toast } from '../../components/Toasts';
+import { askConfirm } from '../../components/ConfirmDialog';
 import BacklinksPanel from './BacklinksPanel';
 
 // The editors are big (BlockNote, Excalidraw): load them only when needed.
@@ -275,7 +276,7 @@ export default function PageView() {
       <button
         type="button"
         onClick={async () => {
-          if (!window.confirm(t('page.deleteForeverConfirm'))) return;
+          if (!(await askConfirm(t('page.deleteForeverConfirm'), { confirmLabel: t('page.deleteForever') }))) return;
           await purgePage(id);
           navigate('/trash');
         }}

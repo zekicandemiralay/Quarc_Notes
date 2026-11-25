@@ -6,6 +6,7 @@ import { relativeTime } from '../../lib/time';
 import PageShell from '../../components/PageShell';
 import PageIcon from '../../components/PageIcon';
 import { toast } from '../../components/Toasts';
+import { askConfirm } from '../../components/ConfirmDialog';
 
 export default function Trash() {
   const { t, i18n } = useTranslation();
@@ -23,12 +24,12 @@ export default function Trash() {
   }
 
   async function handleDeleteForever(p) {
-    if (!window.confirm(t('page.deleteForeverConfirm'))) return;
+    if (!(await askConfirm(t('page.deleteForeverConfirm'), { confirmLabel: t('page.deleteForever') }))) return;
     await purgePage(p.id);
   }
 
   async function handleEmpty() {
-    if (!window.confirm(t('trash.emptyConfirm', { count: trashed.length }))) return;
+    if (!(await askConfirm(t('trash.emptyConfirm', { count: trashed.length }), { confirmLabel: t('trash.empty') }))) return;
     await emptyTrash();
   }
 

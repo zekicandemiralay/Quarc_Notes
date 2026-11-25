@@ -8,6 +8,7 @@ import { ensureLocalOwner } from './lib/api';
 import { reloadPageIndex } from './lib/pageIndex';
 import { on } from './lib/events';
 import Toasts, { toast } from './components/Toasts';
+import ConfirmDialog from './components/ConfirmDialog';
 import Login from './pages/Login/Login';
 import Layout from './pages/Layout/Layout';
 import Home from './pages/Home/Home';
@@ -95,6 +96,7 @@ export default function App() {
         </Route>
       </Routes>
       <Toasts />
+      <ConfirmDialog />
     </>
   );
 }
