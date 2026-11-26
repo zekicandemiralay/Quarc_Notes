@@ -27,6 +27,15 @@ export function sheetDims(settings) {
 export const sheetTop = (i, dims) => i * (dims.height + PAGE_GAP);
 export const docHeight = (count, dims) => count * dims.height + Math.max(0, count - 1) * PAGE_GAP;
 
+// The horizontal extent { left, right } (scene x) of the sheet under a scene point, or null on the desk around /
+// between the sheets.
+export function sheetEdgesAt(x, y, settings) {
+  const dims = sheetDims(settings);
+  if (x < 0 || x > dims.width) return null;
+  const top = sheetTop(sheetAt(y, settings?.pageCount || 1, dims), dims);
+  return y >= top && y <= top + dims.height ? { left: 0, right: dims.width } : null;
+}
+
 // Which sheet a scene y falls on (gaps belong to the sheet above).
 export function sheetAt(y, count, dims) {
   return Math.min(count - 1, Math.max(0, Math.floor((y + PAGE_GAP / 2) / (dims.height + PAGE_GAP))));

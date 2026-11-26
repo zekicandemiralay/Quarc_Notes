@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Excalidraw,
   newElementWith,
+  mutateElement,
   CaptureUpdateAction,
   reconcileElements,
   getSceneVersion,
@@ -22,11 +23,13 @@ import { askConfirm } from '../../components/ConfirmDialog';
 import CanvasToolbar from './canvas/CanvasToolbar';
 import { clipPolylineByPolygon, boundingBoxIntersectsPolygon, getCuttableOutline, cutOutline, pinCutJoints } from './canvas/selectionCut';
 import { shapeToElements, inkWidth, eraserHits, EXCALIDRAW_FREEDRAW_SIZE_FACTOR } from './canvas/elements';
+import { wrapNewText } from './canvas/textWrap';
 import {
   sheetDims,
   sheetTop,
   docHeight,
   sheetAt,
+  sheetEdgesAt,
   sheetsNeeded,
   fitPageZoom,
   fitWidthZoom,
@@ -152,6 +155,7 @@ const CanvasPage = forwardRef(function CanvasPage({ page, onChange, onSettingsCh
   const [toolbarPortalEl, setToolbarPortalEl] = useState(null);
 
   const apiRef = useRef(null);
+  const stopTextWrapRef = useRef(null);
   const containerRef = useRef(null);
   const paperRef = useRef(null);
   const overlayRef = useRef(null);
@@ -539,7 +543,13 @@ const CanvasPage = forwardRef(function CanvasPage({ page, onChange, onSettingsCh
   function handleExcalidrawAPI(api) {
     apiRef.current = api;
     if (initial.legacy) setTimeout(saveNow, 0); // persist the converted format once
+    // New text boxes wrap within the sheet they start on (canvas/textWrap.js).
+    stopTextWrapRef.current?.();
+    stopTextWrapRef.current = api
+      ? wrapNewText(api, { mutateElement, pageAt: (x, y) => sheetEdgesAt(x, y, settingsRef.current) })
+      : null;
   }
+  useEffect(() => () => stopTextWrapRef.current?.(), []);
 
   function handleExcalidrawChange(elements, appState) {
     const tool = appState?.activeTool?.type;
